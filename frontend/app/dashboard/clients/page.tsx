@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PlayCircle, ShieldAlert, Cpu, ArrowUpRight, CopyCheck, AlertTriangle } from "lucide-react";
 
@@ -18,6 +18,13 @@ export default function ClientsPage() {
     const [isSimulating, setIsSimulating] = useState(false);
     const [clientUpdates, setClientUpdates] = useState<ClientUpdate[]>([]);
 
+    // Dataset Upload State
+    const [uploadClientId, setUploadClientId] = useState("");
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "info", msg: string } | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
     // Auto-generate realistic client ID on load
     useEffect(() => {
         setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
@@ -33,7 +40,7 @@ export default function ClientsPage() {
             // Actually, we need to create a dedicated /clients endpoint in main.py for this table.
             // For demo purposes, we will fetch standard metrics to ensure the system is alive
             // and fallback to a mock array if the endpoint isn't built yet, but we WILL build it next.
-            const res = await fetch("http://localhost:8000/clients");
+            const res = await fetch("http://localhost:8000/fl/clients");
             if (res.ok) {
                 const json = await res.json();
                 setClientUpdates(json.data || []);
@@ -46,7 +53,7 @@ export default function ClientsPage() {
     const handleSimulate = async () => {
         setIsSimulating(true);
         try {
-            await fetch("http://localhost:8000/simulate", {
+            await fetch("http://localhost:8000/fl/simulate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -66,11 +73,61 @@ export default function ClientsPage() {
         }
     };
 
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            setSelectedFile(e.target.files[0]);
+        }
+    };
+
+    const handleDatasetUpload = async () => {
+        if (!uploadClientId || !selectedFile) {
+            setUploadStatus({ type: "error", msg: "Please provide both Client ID and a dataset file." });
+            return;
+        }
+
+        setIsUploading(true);
+        setUploadStatus({ type: "info", msg: "Uploading and starting training..." });
+
+        const formData = new FormData();
+        formData.append("client_id", uploadClientId);
+        formData.append("file", selectedFile);
+
+        try {
+            const res = await fetch("http://localhost:8000/fl/api/dataset/upload", {
+                method: "POST",
+                body: formData,
+            });
+
+            if (res.ok) {
+                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
+                if (fileInputRef.current) fileInputRef.current.value = "";
+                setSelectedFile(null);
+            } else {
+                const data = await res.json();
+                setUploadStatus({ type: "error", msg: data.detail || "Failed to upload dataset." });
+            }
+        } catch (e) {
+            setUploadStatus({ type: "error", msg: "Network error occurred." });
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
+    const handleFetchWeights = () => {
+        if (!uploadClientId) {
+            setUploadStatus({ type: "error", msg: "Please enter the Client ID to fetch weights." });
+            return;
+        }
+
+        // Let the browser handle the file download natively
+        window.open(`http://localhost:8000/fl/api/model/weights/${uploadClientId}`, "_blank");
+    };
+
     return (
         <div className="flex flex-col gap-8 pb-10">
             <div className="flex flex-col gap-2">
                 <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">Edge Clients & Tokens</h2>
-                <p className="text-slate-500">Manage connected nodes, simulate updates, and monitor SLT Token slashes.</p>
+                <p className="text-slate-500">Manage connected nodes, simulate updates, monitor SLT Token slashes, and upload local datasets.</p>
             </div>
 
             {/* Admin Simulation Controller */}
@@ -118,13 +175,83 @@ export default function ClientsPage() {
                             onClick={handleSimulate}
                             disabled={isSimulating}
                             className={`transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-lg h-[42px] ${isMalicious
-                                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/50'
-                                    : 'bg-indigo-500 hover:bg-indigo-600 text-white shadow-indigo-900/50'
+                                ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/50'
+                                : 'bg-indigo-500 hover:bg-indigo-600 text-white shadow-indigo-900/50'
                                 } ${isSimulating ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             <PlayCircle className={`w-5 h-5 ${isSimulating ? 'animate-spin' : ''}`} />
                             {isSimulating ? 'Simulating...' : isMalicious ? 'Fire Malicious Payload' : 'Fire Normal Update'}
                         </button>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* User Real Local Dataset Upload Controller */}
+            <Card className="bg-white border-slate-200 shadow-sm relative overflow-hidden">
+                <CardHeader>
+                    <CardTitle className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                        <Cpu className="w-5 h-5 text-indigo-500" />
+                        Local Dataset Training
+                    </CardTitle>
+                    <p className="text-slate-500 text-sm max-w-3xl mt-1">
+                        Upload your personal structured dataset securely. The server will spin up a decentralized training worker in the background exclusively containing your local data. Once training is complete, fetch your isolated locally-trained weights (.pt).
+                    </p>
+                </CardHeader>
+                <CardContent>
+                    <div className="flex flex-col gap-5">
+                        <div className="flex flex-wrap gap-4 items-end">
+                            <div className="flex flex-col gap-2">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Target Client ID</label>
+                                <input
+                                    className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 w-64 transition-all font-mono text-sm"
+                                    value={uploadClientId}
+                                    onChange={(e) => setUploadClientId(e.target.value)}
+                                    placeholder="e.g. MyEdgeNode-1"
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-2">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Dataset File</label>
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="file"
+                                        ref={fileInputRef}
+                                        onChange={handleFileChange}
+                                        className="text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 transition-all cursor-pointer"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3 ml-auto">
+                                <button
+                                    onClick={handleDatasetUpload}
+                                    disabled={isUploading}
+                                    className={`transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm ${isUploading
+                                        ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                        : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                                        }`}
+                                >
+                                    <ArrowUpRight className={`w-4 h-4 ${isUploading ? 'animate-bounce' : ''}`} />
+                                    {isUploading ? 'Uploading...' : 'Upload & Train'}
+                                </button>
+
+                                <button
+                                    onClick={handleFetchWeights}
+                                    className="transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                >
+                                    Fetch Weights
+                                </button>
+                            </div>
+                        </div>
+
+                        {uploadStatus && (
+                            <div className={`p-4 rounded-lg text-sm font-medium border ${uploadStatus.type === "success" ? "bg-green-50 text-green-700 border-green-200" :
+                                uploadStatus.type === "error" ? "bg-red-50 text-red-700 border-red-200" :
+                                    "bg-blue-50 text-blue-700 border-blue-200"
+                                }`}>
+                                {uploadStatus.msg}
+                            </div>
+                        )}
                     </div>
                 </CardContent>
             </Card>

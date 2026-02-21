@@ -16,8 +16,22 @@ supabase: Client = create_client(url, key)
 
 from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, HTTPException
-
 app = FastAPI()
+
+import sys
+import os
+server_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "server"))
+if server_dir not in sys.path:
+    sys.path.append(server_dir)
+
+from server.main import app as fl_app, startup_event as fl_startup
+
+app.mount("/fl", fl_app)
+
+@app.on_event("startup")
+async def root_startup():
+    await fl_startup()
+
 
 
 class SignupRequest(BaseModel):

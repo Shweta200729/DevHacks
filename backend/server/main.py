@@ -280,6 +280,59 @@ async def receive_update(
 
 
 # -------------------------------------------------------------
+# Dataset Upload and Background Training
+# -------------------------------------------------------------
+import shutil
+from fastapi.responses import FileResponse
+
+@app.post("/api/dataset/upload")
+async def upload_dataset(
+    background_tasks: BackgroundTasks,
+    client_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """
+    Uploads a dataset for a specific client and triggers background training.
+    """
+    client_dir = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    os.makedirs(client_dir, exist_ok=True)
+    
+    file_path = os.path.join(client_dir, file.filename)
+    
+    # Save the file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+        
+    logger.info(f"Dataset {file.filename} saved for client {client_id}")
+    
+    # Trigger background training
+    from clients.trainer import train_client_background
+    background_tasks.add_task(train_client_background, client_id, file_path)
+    
+    return {"message": "Dataset uploaded successfully. Background training started."}
+
+
+@app.get("/api/model/weights/{client_id}")
+async def get_client_weights(client_id: str):
+    """
+    Retrieves the trained .pt weights for a specific client if training has finished.
+    """
+    client_dir = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    model_path = os.path.join(client_dir, "model.pt")
+    
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="Weights not found. Training may still be in progress.")
+        
+    return FileResponse(
+        path=model_path, 
+        filename=f"{client_id}_model.pt", 
+        media_type="application/octet-stream"
+    )
+
+# -------------------------------------------------------------
 # Local Simulation Helper
 # -------------------------------------------------------------
 class SimulationRequest(BaseModel):
