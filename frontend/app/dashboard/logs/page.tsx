@@ -22,8 +22,13 @@ export default function LogsPage() {
             // the /metrics and /clients endpoints to simulate a real log server.
             // In a production app, we'd add an /api/logs route filtering Winston or Stdout logs.
             const [metricsRes, clientsRes] = await Promise.all([
+<<<<<<< HEAD
                 fetch("http://localhost:8000/metrics").catch(() => null),
                 fetch("http://localhost:8000/clients").catch(() => null)
+=======
+                fetch("http://localhost:8000/fl/metrics").catch(() => null),
+                fetch("http://localhost:8000/fl/clients").catch(() => null)
+>>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
             ]);
 
             let mergedLogs: LogEntry[] = [];
@@ -103,7 +108,11 @@ export default function LogsPage() {
                 </div>
             </div>
 
+<<<<<<< HEAD
             <Card className="bg-slate-950 border-slate-900 shadow-xl flex-grow flex flex-col overflow-hidden">
+=======
+            <Card className="bg-slate-950 border-slate-900 shadow-xl grow flex flex-col overflow-hidden">
+>>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                 <CardHeader className="border-b border-slate-800 bg-slate-900 py-3 flex flex-row items-center justify-between">
                     <CardTitle className="text-sm font-mono text-slate-300 flex items-center gap-2">
                         <TerminalSquare className="w-4 h-4 text-slate-400" />
@@ -131,7 +140,11 @@ export default function LogsPage() {
                                         {log.node}
                                     </span>
                                 )}
+<<<<<<< HEAD
                                 <span className="text-slate-300 break-words flex-grow">
+=======
+                                <span className="text-slate-300 text-wrap break-words grow">
+>>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                                     {log.message}
                                 </span>
                             </div>
