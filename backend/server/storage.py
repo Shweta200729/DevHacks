@@ -11,7 +11,7 @@ class SupabaseManager:
         os.makedirs(self.models_dir, exist_ok=True)
         
         url: str = os.getenv("SUPABASE")
-        key: str = os.getenv("SUPABASE_ANON_KEY")
+        key: str = os.getenv("SUPABASE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
         if not url or not key:
             raise ValueError("Supabase credentials not found for SupabaseManager initialization.")
         self.supabase: Client = create_client(url, key)
