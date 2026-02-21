@@ -8,8 +8,9 @@ import {
 } from "lucide-react";
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-    ResponsiveContainer, Legend, Area, AreaChart, ComposedChart, Bar
+    ResponsiveContainer, Legend, Area, ComposedChart, Bar
 } from "recharts";
+import { fetchMetrics, MetricsResponse } from "@/lib/api";
 
 interface MetricsData {
     current_version: number;
@@ -21,15 +22,22 @@ interface MetricsData {
 export default function OverviewPage() {
     const [data, setData] = useState<MetricsData | null>(null);
     const [loading, setLoading] = useState(true);
+    // Upload section state
+    const [uploadClientId, setUploadClientId] = useState("");
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [datasetUrl, setDatasetUrl] = useState("");
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
+    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const fetchMetrics = async () => {
+    const loadMetrics = async () => {
         try {
-            const res = await fetch("http://localhost:8000/fl/metrics");
-            if (res.ok) {
-                const json = await res.json();
+            const json = await fetchMetrics();
+            if (json) {
                 json.evaluations = [...json.evaluations].reverse();
                 json.aggregations = [...json.aggregations].reverse();
-                setData(json);
+                setData(json as MetricsData);
                 setLastUpdated(new Date());
             }
         } catch (e) {
@@ -40,10 +48,11 @@ export default function OverviewPage() {
     };
 
     useEffect(() => {
-        fetchMetrics();
-        const interval = setInterval(fetchMetrics, 3000);
+        loadMetrics();
+        const interval = setInterval(loadMetrics, 3000);
         return () => clearInterval(interval);
     }, []);
+
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files.length > 0) {
@@ -159,46 +168,86 @@ export default function OverviewPage() {
         rejected: a.total_rejected,
     }));
 
-    // Real-time insights derived from live data
+    // ── Real-Time Insights ─────────────────────────────────────────────────
+    // Always derives at least 2-3 signals from whatever data is available.
+    // Signals that require evaluation data are only shown when evals exist.
+    // Signals from aggregation + queue + version are always shown.
     const insights: { icon: any; color: string; label: string; detail: string; type: "ok" | "warn" | "info" }[] = [];
 
+    // Server connectivity
+    if (!data && !loading) {
+        insights.push({ icon: AlertTriangle, color: "text-red-500", label: "Cannot Reach Backend", detail: "Check that uvicorn is running on port 8000 and /fl mount is active.", type: "warn" });
+    }
+
+    // ── Signals from evaluation data (only when available) ──
     if (latestEval) {
         const acc = latestEval.accuracy * 100;
         if (acc >= 80) {
             insights.push({ icon: CheckCircle2, color: "text-green-500", label: "Model Converging Well", detail: `${acc.toFixed(1)}% accuracy on validation set`, type: "ok" });
         } else if (acc >= 50) {
-            insights.push({ icon: TrendingUp, color: "text-yellow-500", label: "Model Still Learning", detail: `${acc.toFixed(1)}% accuracy — more training rounds recommended`, type: "warn" });
+            insights.push({ icon: TrendingUp, color: "text-yellow-500", label: "Model Still Learning", detail: `${acc.toFixed(1)}% — more training rounds recommended`, type: "warn" });
         } else {
             insights.push({ icon: AlertTriangle, color: "text-red-500", label: "Underfitting Detected", detail: `Only ${acc.toFixed(1)}% accuracy — check dataset balance`, type: "warn" });
         }
-
         if (lossDelta !== null) {
             if (lossDelta < 0) {
                 insights.push({ icon: TrendingDown, color: "text-green-500", label: "Loss Decreasing", detail: `Δ loss = ${lossDelta.toFixed(4)} — healthy gradient descent`, type: "ok" });
             } else if (lossDelta > 0.5) {
                 insights.push({ icon: AlertTriangle, color: "text-red-500", label: "Loss Spiked", detail: `Δ loss = +${lossDelta.toFixed(4)} — possible poisoning or divergence`, type: "warn" });
             } else {
-                insights.push({ icon: TrendingUp, color: "text-yellow-500", label: "Loss Stable / Plateauing", detail: `Δ loss = +${lossDelta.toFixed(4)} — consider adjusting LR`, type: "info" });
+                insights.push({ icon: TrendingUp, color: "text-yellow-500", label: "Loss Stable / Plateauing", detail: `Δ loss = +${lossDelta.toFixed(4)} — consider adjusting learning rate`, type: "info" });
             }
+        }
+    } else if (data) {
+        // No eval data yet — show a prompt insight
+        insights.push({ icon: Zap, color: "text-slate-400", label: "No Evaluation Data Yet", detail: "Upload a CSV dataset to generate accuracy & loss metrics for this panel.", type: "info" });
+    }
+
+    // ── Signals always derived from aggregation data ──
+    if (data) {
+        const rounds = data.aggregations?.length ?? 0;
+        const version = data.current_version ?? 0;
+
+        if (rounds > 0) {
+            insights.push({
+                icon: CheckCircle2, color: "text-indigo-500", label: `${rounds} Aggregation Round${rounds > 1 ? "s" : ""} Complete`,
+                detail: `Global model is at version v${version} — ${rounds} round${rounds > 1 ? "s" : ""} of federated averaging completed`,
+                type: "ok"
+            });
+        } else {
+            insights.push({
+                icon: Zap, color: "text-slate-400", label: "Awaiting First Round",
+                detail: "No aggregation runs yet. Fire a simulation or upload a dataset to start training.",
+                type: "info"
+            });
+        }
+
+        // Byzantine defense status — derived from acceptance counts
+        if (stats.rej > 0) {
+            const rejectRate = stats.acc > 0 ? ((stats.rej / (stats.acc + stats.rej)) * 100).toFixed(1) : "100";
+            insights.push({
+                icon: ShieldCheck, color: "text-indigo-500", label: "Byzantine Defense Active",
+                detail: `${rejectRate}% of updates blocked by L2 anomaly detector (${stats.rej} rejected out of ${stats.acc + stats.rej} total)`,
+                type: "info"
+            });
+        } else if (stats.acc > 0) {
+            insights.push({
+                icon: ShieldCheck, color: "text-green-500", label: "All Updates Passed Defense",
+                detail: `${stats.acc} update${stats.acc > 1 ? "s" : ""} accepted with clean L2 norm & distance — no Byzantine anomaly detected`,
+                type: "ok"
+            });
+        }
+
+        // Queue status
+        if (data.pending_queue_size > 0) {
+            insights.push({
+                icon: Clock, color: "text-blue-500", label: "Aggregation Queued",
+                detail: `${data.pending_queue_size} update${data.pending_queue_size > 1 ? "s" : ""} pending — aggregation will trigger when MIN_AGGREGATE_SIZE is reached`,
+                type: "info"
+            });
         }
     }
 
-    if (stats.rej > 0) {
-        const rejectRate = stats.acc > 0 ? ((stats.rej / (stats.acc + stats.rej)) * 100).toFixed(1) : "100";
-        insights.push({ icon: ShieldCheck, color: "text-indigo-500", label: "Byzantine Defense Active", detail: `${rejectRate}% of updates blocked by L2 anomaly detector`, type: "info" });
-    }
-
-    if (data?.pending_queue_size && data.pending_queue_size > 0) {
-        insights.push({ icon: Clock, color: "text-blue-500", label: "Aggregation Queued", detail: `${data.pending_queue_size} updates pending — aggregation will trigger soon`, type: "info" });
-    }
-
-    if (data?.current_version && data.current_version > 0 && insights.length === 0) {
-        insights.push({ icon: Zap, color: "text-slate-400", label: "System Idle", detail: "All rounds complete. Upload a dataset or fire a simulation to continue.", type: "info" });
-    }
-
-    if (!data && !loading) {
-        insights.push({ icon: AlertTriangle, color: "text-red-500", label: "Cannot Reach Backend", detail: "Check that uvicorn is running on port 8000.", type: "warn" });
-    }
 
     // Activity feed
     const activityFeed: any[] = [];
