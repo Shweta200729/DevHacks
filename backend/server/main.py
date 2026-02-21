@@ -156,13 +156,29 @@ async def startup_event():
 
 
 def _init_fresh_model():
-    """Helper: save a brand-new random model as version 1."""
+    """Helper: save a brand-new random model at the next available version number."""
     global current_version_num, current_version_id
-    current_version_num = 1
+    try:
+        # Find the highest version already in the DB so we never duplicate
+        rows = (
+            storage.supabase.table("model_versions")
+            .select("version_num")
+            .order("version_num", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if rows.data:
+            current_version_num = rows.data[0]["version_num"] + 1
+        else:
+            current_version_num = 1
+    except Exception:
+        current_version_num = 1
+
     current_version_id = storage.save_model_version(
         global_model.get_weights(), current_version_num
     )
-    logger.info("Initialised fresh global model (Version 1).")
+    logger.info(f"Initialised fresh global model (Version {current_version_num}).")
+
 
 
 # ---------------------------------------------------------------------------
@@ -396,52 +412,41 @@ async def _run_aggregation(batch: List[tuple]):
 
 def train_client_background(client_id: str, file_path: str):
     """
-    Background task: trains a local CNN on an uploaded dataset
-    and saves the weights to data/client_{id}/weights_{id}.pt
-
-    Uses the real client local_training module — no fake gradients.
+    Background task: trains the CNN on the real uploaded dataset (CSV or otherwise)
+    using the real csv_trainer module, then saves weights to the client directory.
     """
-    import time
-    from torch.utils.data import TensorDataset
-
+    import asyncio as _asyncio
     logger.info(f"[BG Train] Starting for client {client_id} on {file_path}")
 
-    client_dir   = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
-    os.makedirs(client_dir, exist_ok=True)
-    weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
-
     try:
-        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-        from clients.local_training import load_global_weights, train_local_model
+        # Resolve paths
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
 
-        local_model = CNNModel()
+        from clients.csv_trainer import train_on_csv
 
-        # Load current global weights into local model
-        async def _fetch():
+        # Fetch current global weights safely
+        async def _fetch_weights():
             async with model_lock:
                 return global_model.get_weights()
 
-        import asyncio as _asyncio
-        gw = _asyncio.run(_fetch())
-        load_global_weights(local_model, gw)
+        gw = _asyncio.run(_fetch_weights())
 
-        # Build a synthetic dataset that matches the CNN input shape (1×28×28)
-        # In production, parse the real file — here we use proper random tensors
-        # so training is genuine PyTorch (no mocking).
-        n_samples = 256
-        X = torch.randn(n_samples, 1, 28, 28)
-        y = torch.randint(0, 10, (n_samples,))
-        ds = TensorDataset(X, y)
-        dl = DataLoader(ds, batch_size=32, shuffle=True)
-
-        updated_weights = train_local_model(
-            local_model, dl, epochs=int(os.getenv("BG_TRAIN_EPOCHS", "3"))
+        saved_path = train_on_csv(
+            client_id=client_id,
+            csv_path=file_path,
+            global_weights=gw,
+            epochs=int(os.getenv("BG_TRAIN_EPOCHS", "3")),
         )
-        torch.save(updated_weights, weights_path)
-        logger.info(f"[BG Train] Saved weights for client {client_id}.")
+
+        if saved_path:
+            logger.info(f"[BG Train] ✅ Weights saved to {saved_path}")
+        else:
+            logger.warning(f"[BG Train] ⚠️  Training produced no weights for {client_id}.")
 
     except Exception as exc:
-        logger.error(f"[BG Train] Failed for client {client_id}: {exc}")
+        logger.error(f"[BG Train] ❌ Failed for client {client_id}: {exc}", exc_info=True)
 
 
 @app.get("/api/model/weights/{client_id}")
@@ -483,13 +488,20 @@ async def upload_dataset(
     file_path = ""
 
     if file:
-        file_path = os.path.join(client_dir, file.filename)
+        file_path = os.path.join(client_dir, file.filename or "dataset.csv")
         try:
-            with open(file_path, "wb") as buf:
-                shutil.copyfileobj(file.file, buf)
+            # Stream-write in 1 MB chunks to avoid loading the whole file into RAM
+            CHUNK = 1024 * 1024  # 1 MB
+            with open(file_path, "wb") as out:
+                while True:
+                    chunk = await file.read(CHUNK)
+                    if not chunk:
+                        break
+                    out.write(chunk)
         except Exception as exc:
             raise HTTPException(500, f"Failed to save file: {exc}")
-        logger.info(f"Dataset '{file.filename}' saved for client {client_id}.")
+        logger.info(f"Dataset '{file.filename}' saved for client {client_id} (streaming).")
+
 
     elif dataset_url:
         parsed   = urlparse(dataset_url)
