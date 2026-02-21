@@ -21,7 +21,7 @@ export default function SettingsPage() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        fetch("http://localhost:8000/admin/config")
+        fetch("http://localhost:8000/fl/admin/config")
             .then(r => r.ok ? r.json() : null)
             .then(d => { if (d) setConfig(d); })
             .catch(() => { })
@@ -30,7 +30,7 @@ export default function SettingsPage() {
 
     const handleSave = async () => {
         try {
-            const res = await fetch("http://localhost:8000/admin/config", {
+            const res = await fetch("http://localhost:8000/fl/admin/config", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(config),
