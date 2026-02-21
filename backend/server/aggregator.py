@@ -1,168 +1,248 @@
-import os
+"""
+server/aggregator.py
+
+Aggregation strategies for the Federated Learning server.
+
+All tunable values (trim_ratio, clip_norm, noise_mult, dp_enabled)
+come exclusively from FLSettings — no magic numbers in this file.
+
+Pure ML logic: no database calls, no HTTP logic, no dataset specifics.
+"""
+
+import logging
 import math
+from typing import Dict, List, Optional
+
 import torch
-from typing import List, Dict
+
+from config.settings import FLSettings, settings as _default_settings
+
+logger = logging.getLogger(__name__)
+
+WeightsDict = Dict[str, torch.Tensor]
 
 
-def fedavg(updates: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+# ---------------------------------------------------------------------------
+# FedAvg
+# ---------------------------------------------------------------------------
+
+def fedavg(updates: List[WeightsDict]) -> WeightsDict:
     """
-    Performs Federated Averaging (FedAvg) aggregation over a list of client updates.
+    Federated Averaging (McMahan et al., 2017).
+
+    Stacks client updates layer-wise and computes the element-wise mean.
+    No trimming; treats all contributions equally.
+
+    Args:
+        updates: Non-empty list of client state dicts (CPU tensors).
+
+    Returns:
+        Averaged state dict.
+
+    Raises:
+        ValueError: If updates list is empty.
     """
     if not updates:
-        raise ValueError("Cannot aggregate an empty list of updates.")
+        raise ValueError("fedavg: cannot aggregate an empty list.")
 
-    aggregated_weights = {}
-    keys = updates[0].keys()
-
-    for key in keys:
-        tensors = []
-        for update in updates:
-            if key in update:
-                tensors.append(update[key].cpu())
-
+    aggregated: WeightsDict = {}
+    for key in updates[0].keys():
+        tensors = [u[key].cpu() for u in updates if key in u]
         if tensors:
-            stacked_tensors = torch.stack(tensors)
-            aggregated_weights[key] = torch.mean(stacked_tensors, dim=0)
+            aggregated[key] = torch.stack(tensors).mean(dim=0)
 
-    return aggregated_weights
+    logger.debug(f"[FedAvg] Aggregated {len(updates)} updates.")
+    return aggregated
 
+
+# ---------------------------------------------------------------------------
+# Trimmed Mean
+# ---------------------------------------------------------------------------
 
 def trimmed_mean(
-    updates: List[Dict[str, torch.Tensor]], trim_ratio: float = 0.2
-) -> Dict[str, torch.Tensor]:
+    updates:    List[WeightsDict],
+    cfg:        Optional[FLSettings] = None,
+) -> WeightsDict:
     """
-    Performs Trimmed Mean aggregation over a list of client updates.
-    At each position in the tensor, it sorts the values from all clients,
-    removes the highest and lowest `trim_ratio` fraction of values, and
-    takes the mean of the remaining values.
+    Trimmed Mean aggregation (robust to Byzantine clients).
+
+    For each parameter position, sorts values from all clients,
+    removes the top and bottom `trim_ratio` fraction, and averages
+    the remaining values.
+
+    trim_ratio comes from cfg.TRIM_RATIO (no magic default here).
+
+    Args:
+        updates: Non-empty list of client state dicts.
+        cfg:     FLSettings instance (defaults to singleton).
+
+    Returns:
+        Trimmed-mean state dict.
+
+    Raises:
+        ValueError: If updates is empty.
+        ValueError: If trim_ratio is not in [0, 0.5).
     """
+    cfg = cfg or _default_settings
+    trim_ratio = cfg.TRIM_RATIO
+
     if not updates:
-        raise ValueError("Cannot aggregate an empty list of updates.")
-    if not (0.0 <= trim_ratio < 0.5):
-        raise ValueError("trim_ratio must be between 0.0 and <0.5")
+        raise ValueError("trimmed_mean: cannot aggregate an empty list.")
+    if not 0.0 <= trim_ratio < 0.5:
+        raise ValueError("TRIM_RATIO must be in [0, 0.5).")
 
-    num_clients = len(updates)
-    trim_count = int(num_clients * trim_ratio)
+    n          = len(updates)
+    trim_count = int(n * trim_ratio)
 
-    if 2 * trim_count >= num_clients:
-        trim_count = 0
+    # If trimming would remove all clients, fall back to fedavg
+    if 2 * trim_count >= n:
+        logger.warning(
+            f"[TrimmedMean] trim_count={trim_count} would trim all {n} updates. "
+            "Falling back to FedAvg."
+        )
+        return fedavg(updates)
 
-    aggregated_weights = {}
-    keys = updates[0].keys()
+    aggregated: WeightsDict = {}
+    for key in updates[0].keys():
+        tensors = [u[key].cpu() for u in updates if key in u]
+        if not tensors:
+            continue
+        stacked = torch.stack(tensors)          # (n, *shape)
+        sorted_, _ = torch.sort(stacked, dim=0)
+        sliced = sorted_[trim_count: n - trim_count]
+        aggregated[key] = sliced.mean(dim=0)
 
-    for key in keys:
-        tensors = []
-        for update in updates:
-            if key in update:
-                tensors.append(update[key].cpu())
-
-        if tensors:
-            stacked_tensors = torch.stack(tensors)  # Shape: (num_clients, ...)
-
-            if trim_count == 0:
-                aggregated_weights[key] = torch.mean(stacked_tensors, dim=0)
-                continue
-
-            # Real tensor sort over client dimension 0
-            sorted_tensors, _ = torch.sort(stacked_tensors, dim=0)
-
-            # Trim extreme values
-            trimmed_tensors = sorted_tensors[trim_count:-trim_count]
-
-            # Mean the valid bounded values
-            aggregated_weights[key] = torch.mean(trimmed_tensors, dim=0)
-
-    return aggregated_weights
+    logger.debug(
+        f"[TrimmedMean] Aggregated {n} updates, "
+        f"trim_count={trim_count} (ratio={trim_ratio})."
+    )
+    return aggregated
 
 
-# ===========================================================
-# Differential Privacy Utilities
-# ===========================================================
+# ---------------------------------------------------------------------------
+# Differential Privacy utilities
+# ---------------------------------------------------------------------------
 
-
-def clip_weights(
-    weights: Dict[str, torch.Tensor], clip_norm: float
-) -> Dict[str, torch.Tensor]:
+def clip_weights(weights: WeightsDict, clip_norm: float) -> WeightsDict:
     """
-    Clips a client's weight dictionary so that its total L2 norm
-    does not exceed `clip_norm`. This is the standard per-sample
-    gradient clipping step used in DP-SGD.
+    Per-update L2 norm clipping.
+
+    Scales the entire weight dict so its total L2 norm ≤ clip_norm.
+    No-op when the norm is already within bounds.
+
+    Args:
+        weights:   Client state dict.
+        clip_norm: Maximum allowed L2 norm (from cfg.DP_CLIP_NORM).
+
+    Returns:
+        Clipped state dict (new tensors, originals unchanged).
     """
-    # Compute total L2 norm across all tensors
-    total_norm_sq = 0.0
+    sq_sum = 0.0
     with torch.no_grad():
         for v in weights.values():
-            total_norm_sq += torch.sum(v.cpu() ** 2).item()
-    total_norm = math.sqrt(total_norm_sq)
-
-    # Scale factor (no-op if norm is already within bound)
+            sq_sum += torch.sum(v.cpu().float() ** 2).item()
+    total_norm = math.sqrt(sq_sum)
     scale = min(1.0, clip_norm / (total_norm + 1e-9))
-
     return {k: v.cpu() * scale for k, v in weights.items()}
 
 
-def add_gaussian_dp_noise(
-    aggregated: Dict[str, torch.Tensor],
-    clip_norm: float,
-    noise_multiplier: float,
-    num_clients: int,
-) -> Dict[str, torch.Tensor]:
+def add_gaussian_noise(
+    aggregated:        WeightsDict,
+    clip_norm:         float,
+    noise_multiplier:  float,
+    num_clients:       int,
+) -> WeightsDict:
     """
-    Adds calibrated Gaussian noise to an already-aggregated weight dict.
+    Adds calibrated Gaussian noise for (ε, δ)-DP.
 
-    The noise standard deviation per coordinate is:
-        sigma = noise_multiplier * clip_norm / num_clients
-
-    This is the standard DP-FL formulation (Geyer et al., 2017).
-    A higher noise_multiplier = stronger privacy guarantee (larger epsilon cost).
+    σ = noise_multiplier × clip_norm / num_clients
 
     Args:
-        aggregated:       Aggregated weight dict (output of trimmed_mean / fedavg).
-        clip_norm:        The clipping threshold used on individual updates.
-        noise_multiplier: Noise scale relative to clip_norm (sigma = nm * C / n).
-        num_clients:      Number of clients that contributed to this round.
+        aggregated:       Aggregated weight dict.
+        clip_norm:        Clipping norm used on individual updates.
+        noise_multiplier: σ scale relative to clip_norm.
+        num_clients:      Number of contributing clients.
 
     Returns:
-        Noisy aggregated weight dict.
+        Noisy weight dict.
     """
     sigma = noise_multiplier * clip_norm / max(num_clients, 1)
-    noisy_weights = {}
+    noisy: WeightsDict = {}
     with torch.no_grad():
         for key, tensor in aggregated.items():
-            noise = torch.randn_like(tensor) * sigma
-            noisy_weights[key] = tensor + noise
-    return noisy_weights
+            noisy[key] = tensor + torch.randn_like(tensor) * sigma
+    logger.debug(f"[DP] Gaussian noise added with σ={sigma:.6f}.")
+    return noisy
 
 
 def dp_trimmed_mean(
-    updates: List[Dict[str, torch.Tensor]],
-    trim_ratio: float = 0.2,
-    clip_norm: float = 10.0,
-    noise_multiplier: float = 1.0,
-    enabled: bool = True,
-) -> Dict[str, torch.Tensor]:
+    updates: List[WeightsDict],
+    cfg:     Optional[FLSettings] = None,
+) -> WeightsDict:
     """
-    Full DP-aware aggregation pipeline:
-    1. Clip each client's update to `clip_norm`.
-    2. Run Trimmed Mean aggregation.
-    3. Add calibrated Gaussian noise to the result.
+    Full DP-FL aggregation pipeline:
+        1. Clip each update to cfg.DP_CLIP_NORM.
+        2. Trimmed Mean aggregation using cfg.TRIM_RATIO.
+        3. Add Gaussian noise with cfg.DP_NOISE_MULT.
 
-    If `enabled=False`, falls back to plain trimmed_mean (for ablations).
+    If cfg.DP_ENABLED is False, falls back to plain trimmed_mean.
+
+    Args:
+        updates: Non-empty list of client state dicts.
+        cfg:     FLSettings instance (defaults to singleton).
+
+    Returns:
+        Aggregated (and optionally noisy) state dict.
     """
-    if not enabled:
-        return trimmed_mean(updates, trim_ratio=trim_ratio)
+    cfg = cfg or _default_settings
 
-    # Step 1 — per-client clipping
-    clipped = [clip_weights(u, clip_norm) for u in updates]
+    if not cfg.DP_ENABLED:
+        logger.debug("[Aggregation] DP disabled — using plain Trimmed Mean.")
+        return trimmed_mean(updates, cfg=cfg)
 
-    # Step 2 — robust aggregation
-    aggregated = trimmed_mean(clipped, trim_ratio=trim_ratio)
-
-    # Step 3 — Gaussian noise injection
-    noisy = add_gaussian_dp_noise(
-        aggregated,
-        clip_norm=clip_norm,
-        noise_multiplier=noise_multiplier,
-        num_clients=len(updates),
+    clipped   = [clip_weights(u, cfg.DP_CLIP_NORM) for u in updates]
+    agg       = trimmed_mean(clipped, cfg=cfg)
+    noisy     = add_gaussian_noise(
+        agg,
+        clip_norm        = cfg.DP_CLIP_NORM,
+        noise_multiplier = cfg.DP_NOISE_MULT,
+        num_clients      = len(updates),
+    )
+    logger.info(
+        f"[Aggregation] DP-Trimmed-Mean complete | "
+        f"n={len(updates)}, clip={cfg.DP_CLIP_NORM}, σ_mult={cfg.DP_NOISE_MULT}"
     )
     return noisy
+
+
+# ---------------------------------------------------------------------------
+# Unified entry-point used by server/main.py
+# ---------------------------------------------------------------------------
+
+def aggregate(
+    updates: List[WeightsDict],
+    cfg:     Optional[FLSettings] = None,
+) -> tuple[WeightsDict, str]:
+    """
+    Selects and runs the appropriate aggregation strategy from settings.
+
+    Strategy selection:
+        DP_ENABLED=True  → DP-Trimmed Mean
+        DP_ENABLED=False, TRIM_RATIO > 0 → Trimmed Mean
+        DP_ENABLED=False, TRIM_RATIO == 0 → FedAvg
+
+    Args:
+        updates: Non-empty list of accepted client state dicts.
+        cfg:     FLSettings instance.
+
+    Returns:
+        (aggregated_weights, method_name_string)
+    """
+    cfg = cfg or _default_settings
+
+    if cfg.DP_ENABLED:
+        return dp_trimmed_mean(updates, cfg=cfg), "DP-Trimmed Mean"
+    elif cfg.TRIM_RATIO > 0:
+        return trimmed_mean(updates, cfg=cfg), "Trimmed Mean"
+    else:
+        return fedavg(updates), "FedAvg"

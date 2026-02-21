@@ -1,55 +1,129 @@
-import os
+"""
+server/detection.py
+
+Byzantine update detection for the FL aggregation server.
+
+Decision thresholds (NORM_THRESHOLD, DISTANCE_THRESHOLD) come exclusively
+from config.settings — no magic numbers in this file.
+
+Pure ML logic: no database calls, no HTTP logic, no dataset specifics.
+Works on any model's state_dict — no architecture assumptions.
+"""
+
+import logging
+from typing import Dict, Tuple
+
 import torch
-from typing import Tuple, Dict
+
+from config.settings import FLSettings, settings as _default_settings
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 def flattened_l2_norm(weights_dict: Dict[str, torch.Tensor]) -> float:
     """
-    Computes the total L2 norm of a dictionary of model weights.
-    All tensors are flattened and summed before taking the square root.
+    Computes the total L2 norm of a weight dictionary.
+    All tensors are flattened and combined before taking the square root.
+
+    Args:
+        weights_dict: Model state dict (any architecture).
+
+    Returns:
+        Scalar L2 norm (float).
     """
-    squared_sum = 0.0
+    sq_sum = 0.0
     with torch.no_grad():
         for tensor in weights_dict.values():
-            squared_sum += torch.sum(tensor ** 2).item()
-    return squared_sum ** 0.5
+            sq_sum += torch.sum(tensor.cpu().float() ** 2).item()
+    return sq_sum ** 0.5
+
+
+def l2_distance(
+    weights_a: Dict[str, torch.Tensor],
+    weights_b: Dict[str, torch.Tensor],
+) -> float:
+    """
+    Computes the L2 distance between two weight dictionaries.
+
+    Keys present only in one dict contribute the full norm of that tensor
+    (graceful handling of partial key overlap).
+
+    Args:
+        weights_a: First state dict.
+        weights_b: Second state dict.
+
+    Returns:
+        Scalar L2 distance (float).
+    """
+    sq_sum = 0.0
+    all_keys = set(weights_a.keys()) | set(weights_b.keys())
+    with torch.no_grad():
+        for key in all_keys:
+            if key in weights_a and key in weights_b:
+                diff    = weights_a[key].cpu().float() - weights_b[key].cpu().float()
+                sq_sum += torch.sum(diff ** 2).item()
+            elif key in weights_a:
+                sq_sum += torch.sum(weights_a[key].cpu().float() ** 2).item()
+            else:
+                sq_sum += torch.sum(weights_b[key].cpu().float() ** 2).item()
+    return sq_sum ** 0.5
+
+
+# ---------------------------------------------------------------------------
+# Public detection function
+# ---------------------------------------------------------------------------
 
 def detect_update(
     update_weights: Dict[str, torch.Tensor],
-    global_weights: Dict[str, torch.Tensor]
+    global_weights: Dict[str, torch.Tensor],
+    cfg: FLSettings = None,
 ) -> Tuple[str, str, float, float]:
     """
-    Detects if a client's weight update is potentially malicious by checking its L2 norm
-    and its L2 distance from the global model using mathematically valid environments limits.
+    Decides whether a client update is safe to aggregate.
+
+    Checks:
+        1. L2 norm of the update → must be <= cfg.NORM_THRESHOLD
+        2. L2 distance from global model → must be <= cfg.DISTANCE_THRESHOLD
+
+    All thresholds come from FLSettings — no hardcoded numbers.
+
+    Args:
+        update_weights: Client's submitted state dict.
+        global_weights: Current server global state dict.
+        cfg:            FLSettings instance (defaults to singleton).
 
     Returns:
-        A tuple (status, reason, calculated_norm, calculated_distance), 
-        where status is either "ACCEPT" or "REJECT".
+        (status, reason, norm, distance)
+        where status ∈ {"ACCEPT", "REJECT"}.
     """
-    # Environment boundaries setup
-    norm_threshold = float(os.getenv("DETECTION_NORM_THRESHOLD", "50.0"))
-    distance_threshold = float(os.getenv("DETECTION_DISTANCE_THRESHOLD", "25.0"))
+    cfg = cfg or _default_settings
 
-    # 1. Compute total L2 norm of update weights.
-    update_norm = flattened_l2_norm(update_weights)
-    
-    # 2. Compute L2 Euclidean distance between update_weights and global_weights.
-    distance_squared_sum = 0.0
-    with torch.no_grad():
-        for key in update_weights.keys():
-            if key in global_weights:
-                diff = update_weights[key].cpu() - global_weights[key].cpu()
-                distance_squared_sum += torch.sum(diff ** 2).item()
-            else:
-                # Handle key mismatch gracefully by adding the update weight's norm squared
-                distance_squared_sum += torch.sum(update_weights[key].cpu() ** 2).item()
-            
-    distance = distance_squared_sum ** 0.5
+    norm     = flattened_l2_norm(update_weights)
+    distance = l2_distance(update_weights, global_weights)
 
-    # 3. Decision bounds checking
-    if update_norm > norm_threshold:
-        return ("REJECT", f"Update norm too large ({update_norm:.2f} > {norm_threshold})", update_norm, distance)
-    
-    if distance > distance_threshold:
-        return ("REJECT", f"Update too far from global model ({distance:.2f} > {distance_threshold})", update_norm, distance)
-        
-    return ("ACCEPT", "Update valid", update_norm, distance)
+    logger.debug(
+        f"[Detection] norm={norm:.4f} (thresh={cfg.NORM_THRESHOLD}), "
+        f"distance={distance:.4f} (thresh={cfg.DISTANCE_THRESHOLD})"
+    )
+
+    if norm > cfg.NORM_THRESHOLD:
+        reason = (
+            f"Update norm {norm:.4f} exceeds threshold {cfg.NORM_THRESHOLD}"
+        )
+        logger.info(f"[Detection] REJECT — {reason}")
+        return "REJECT", reason, norm, distance
+
+    if distance > cfg.DISTANCE_THRESHOLD:
+        reason = (
+            f"Update distance {distance:.4f} exceeds threshold "
+            f"{cfg.DISTANCE_THRESHOLD}"
+        )
+        logger.info(f"[Detection] REJECT — {reason}")
+        return "REJECT", reason, norm, distance
+
+    logger.info(f"[Detection] ACCEPT — norm={norm:.4f}, distance={distance:.4f}")
+    return "ACCEPT", "Update within acceptable bounds.", norm, distance

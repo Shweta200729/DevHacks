@@ -1,363 +1,748 @@
-import os
+"""
+server/main.py
+
+Production Asynchronous Federated Learning Server.
+
+All configurable parameters come from config.settings (FLSettings).
+No magic numbers, no hardcoded dataset names, no hardcoded model shapes.
+
+Endpoints:
+  GET  /model              — Clients fetch current global weights.
+  POST /update             — Clients push locally-trained weight updates.
+  GET  /metrics            — Dashboard: evaluation & aggregation history.
+  GET  /clients            — Dashboard: recent client update attempts.
+  GET  /versions           — Dashboard: model version registry.
+  GET  /model/download     — Download a saved global model checkpoint.
+  POST /simulate           — Fire a synthetic FL round (for testing/demo).
+  POST /admin/config       — Hot-update runtime settings.
+  GET  /admin/config       — Read current runtime settings.
+  POST /api/dataset/upload — Upload a CSV dataset and trigger background training.
+  GET  /api/model/weights/{client_id} — Download per-client trained weights.
+
+Architecture:
+  - All ML logic (aggregation, detection, evaluation) is fully modular.
+  - DB logic is isolated inside SupabaseManager.
+  - asyncio.Lock guards all global model mutations.
+  - Model architecture is determined at runtime from data shape (no CNNModel import).
+"""
+
 import io
+import os
+import sys
+import ssl
 import asyncio
 import logging
-from typing import Dict, Any, List
+import shutil
+import urllib.request
+from urllib.parse import urlparse
+from typing import Dict, Any, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
 import torch
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
-# Load custom FL modules
-from model import CNNModel
-from detection import detect_update
-from aggregator import dp_trimmed_mean
-from storage import SupabaseManager
-import sys
+# ── Configuration (single source of truth) ─────────────────────────────────
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from config.settings import FLSettings, settings as cfg
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# ── Model factory ────────────────────────────────────────────────────────────
+from models.model_factory import build_model, FLModel
+
+# ── Universal dataset loader ─────────────────────────────────────────────────
+from data.dataset_loader import load_dataset
+
+# ── Server-side ML modules ────────────────────────────────────────────────────
+from server.detection import detect_update
+from server.aggregator import aggregate
+from server.storage import SupabaseManager
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
 from experiments.evaluation import evaluate_model
 
-# -------------------------------------------------------------
-# Configuration & Setup
-# -------------------------------------------------------------
-load_dotenv()
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from fastapi.middleware.cors import CORSMiddleware
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 
-app = FastAPI(title="Production Asynchronous Federated Learning")
+app = FastAPI(
+    title="Asynchronous Federated Learning Server",
+    description="Dataset-agnostic, model-agnostic FL server.",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------------------------
+# Global mutable state  (all writes go through model_lock)
+# ---------------------------------------------------------------------------
 
-# Global State
-global_model = CNNModel()
-model_lock = asyncio.Lock()
-storage: SupabaseManager = None
+global_model:    Optional[FLModel]     = None
+model_lock:      asyncio.Lock          = asyncio.Lock()
+storage:         Optional[SupabaseManager] = None
+val_loader:      Optional[DataLoader]  = None
+pending_updates: List[Tuple[str, Dict[str, torch.Tensor]]] = []
 
-# In-memory queue of valid updates waiting to be aggregated
-# List of Tuples (client_id, weight_dict)
-pending_updates: List[tuple] = []
-MIN_UPDATE_QUEUE = int(os.getenv("MIN_AGGREGATE_SIZE", "3"))
+# Runtime-mutable config mirror — updated via POST /admin/config
+# Points to the singleton; only the DP/queue fields are hot-swappable.
+runtime_cfg: FLSettings = cfg   # replaced by ConfigUpdate POST
 
-# Differential Privacy Configuration
-# DP_ENABLED       – set to "false" to disable DP (ablation mode)
-# DP_CLIP_NORM     – max L2 norm per client update (sensitivity bound, C)
-# DP_NOISE_MULT    – noise multiplier (sigma = noise_mult * clip_norm / n)
-#                    Higher = more privacy, more noise. Typical range: 0.5 – 2.0
-DP_ENABLED = os.getenv("DP_ENABLED", "true").lower() == "true"
-DP_CLIP_NORM = float(os.getenv("DP_CLIP_NORM", "10.0"))
-DP_NOISE_MULT = float(os.getenv("DP_NOISE_MULT", "1.0"))
+current_version_id:  Optional[str] = None
+current_version_num: int            = 0
 
-# Validation Dataset Tracker (Loaded on startup to save memory)
-val_loader: DataLoader = None
 
-# Active DB Record Trackers
-current_version_id: int = None
-current_version_num: int = 0
-
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def startup_event():
-    global storage, val_loader, current_version_id, current_version_num
+    """
+    Runs on server boot:
+    1. Initialise Supabase storage.
+    2. Load dataset (to learn input_shape & num_classes).
+    3. Build global model from those shapes.
+    4. Restore latest checkpoint if one exists.
+    5. Load validation DataLoader.
+    """
+    global storage, global_model, val_loader, current_version_id, current_version_num
+
+    # ── 1. Storage ────────────────────────────────────────────────────────────
     try:
         storage = SupabaseManager()
-        logger.info("SupabaseManager Initialized.")
-    except Exception as e:
-        logger.error(f"Failed to initialize SupabaseManager: {e}")
-        # Not raising, allowing server to start for visibility, but it won't work well
+        logger.info("SupabaseManager initialised.")
+    except Exception as exc:
+        logger.error(f"SupabaseManager init failed: {exc}")
 
-    # Attempt to load latest version
-    if storage:
-        latest = storage.get_latest_version()
-        if (
-            latest["version_num"] > 0
-            and latest["file_path"]
-            and os.path.exists(latest["file_path"])
-        ):
-            global_model.load_state_dict(torch.load(latest["file_path"]))
-            current_version_num = latest["version_num"]
-            current_version_id = latest["id"]
-            logger.info(f"Loaded existing global model: Version {current_version_num}")
-        else:
-            # First time startup
-            current_version_num = 1
-            current_version_id = storage.save_model_version(
-                global_model.get_weights(), current_version_num
-            )
-            logger.info("Initialized Brand New Global Model (Version 1).")
-
-    import ssl
-
+    # ── 2 & 3. Dataset → model (only if DATASET_NAME is configured) ─────────
     ssl._create_default_https_context = ssl._create_unverified_context
 
-    # Load MNIST Validation Set
-    transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    if cfg.DATASET_NAME.strip():
+        try:
+            logger.info(f"Loading dataset '{cfg.DATASET_NAME}' …")
+            ds_result   = load_dataset(cfg)
+            input_shape = ds_result["input_shape"]
+            num_classes = ds_result["num_classes"]
+            val_loader  = ds_result["val_dataloader"]
+        except Exception as exc:
+            logger.error(f"Dataset load failed: {exc}.")
+            input_shape = None
+            num_classes = None
+    else:
+        logger.info("DATASET_NAME is empty — skipping auto-download. "
+                     "Model will be built when a client uploads data.")
+        input_shape = None
+        num_classes = None
+
+    if input_shape and num_classes:
+        global_model = build_model(
+            input_shape = input_shape,
+            num_classes = num_classes,
+            hidden_dims = cfg.hidden_dims(),
+        )
+    if global_model:
+        logger.info(f"Global model built: {global_model}")
+    else:
+        logger.info("No model built — waiting for client dataset upload.")
+
+    # ── 4. Restore checkpoint from DB ────────────────────────────────────────
+    if storage and global_model:
+        latest = storage.get_latest_version()
+        if latest["version_num"] > 0 and latest["file_path"] and os.path.exists(latest["file_path"]):
+            try:
+                ckpt = torch.load(latest["file_path"], weights_only=True, map_location="cpu")
+                global_model.set_weights(ckpt)
+                current_version_num = latest["version_num"]
+                current_version_id  = latest["id"]
+                logger.info(f"Restored checkpoint: Version {current_version_num}")
+            except Exception as exc:
+                logger.warning(f"Checkpoint load failed ({exc}). Starting fresh.")
+                await _init_fresh_model()
+        else:
+            await _init_fresh_model()
+
+
+async def _init_fresh_model():
+    """Saves the freshly-built model as Version N+1 in the DB."""
+    global current_version_num, current_version_id
+    if not storage:
+        current_version_num = 1
+        return
+    try:
+        rows = (
+            storage.supabase.table("model_versions")
+            .select("version_num")
+            .order("version_num", desc=True)
+            .limit(1)
+            .execute()
+        )
+        current_version_num = (rows.data[0]["version_num"] + 1) if rows.data else 1
+    except Exception:
+        current_version_num = 1
+    current_version_id = storage.save_model_version(
+        global_model.get_weights(), current_version_num
     )
-    val_dataset = datasets.MNIST(
-        "../data", train=False, download=True, transform=transform
+    logger.info(f"Fresh global model saved as Version {current_version_num}.")
+
+
+# ---------------------------------------------------------------------------
+# Core aggregation pipeline
+# ---------------------------------------------------------------------------
+
+async def _aggregate_and_update(updates: List[Tuple[str, Dict]]) -> Dict[str, float]:
+    """
+    Called inside model_lock.
+    Aggregates client updates, applies result to global model, evaluates, persists.
+
+    Args:
+        updates: List of (client_id, state_dict) pairs.
+
+    Returns:
+        {'loss': float, 'accuracy': float}
+    """
+    global current_version_num, current_version_id
+
+    weight_dicts = [w for _, w in updates]
+    n = len(weight_dicts)
+
+    logger.info(f"[Aggregation] Running on {n} update(s) …")
+
+    aggregated, method_name = aggregate(weight_dicts, cfg=runtime_cfg)
+
+    global_model.set_weights(aggregated)
+    current_version_num += 1
+
+    metrics = evaluate_model(global_model, val_loader, device=cfg.DEVICE)
+
+    if storage:
+        new_vid = storage.save_model_version(aggregated, current_version_num)
+        storage.log_aggregation(new_vid, accepted=n, rejected=0, method=method_name)
+        storage.log_evaluation(new_vid, metrics["loss"], metrics["accuracy"])
+        current_version_id = new_vid
+
+    logger.info(
+        f"[Round {current_version_num}] method={method_name} | "
+        f"loss={metrics['loss']:.4f} | acc={metrics['accuracy']:.4f}"
     )
-    val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
-    logger.info("MNIST Evaluation Dataset Loaded.")
+    return metrics
 
 
-# -------------------------------------------------------------
-# Core Execution Handlers
-# -------------------------------------------------------------
+def _run_aggregation_sync(batch: List[Tuple]):
+    """Synchronous wrapper for BackgroundTasks."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run_aggregation_async(batch))
+    finally:
+        loop.close()
 
 
-async def trigger_aggregation():
+async def _run_aggregation_async(batch: List[Tuple]):
+    async with model_lock:
+        await _aggregate_and_update(batch)
+
+
+# ---------------------------------------------------------------------------
+# Core endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/model")
+async def get_global_model():
+    """Clients download current global model weights (.pt binary)."""
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+    async with model_lock:
+        weights = global_model.get_weights()
+    buf = io.BytesIO()
+    torch.save(weights, buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=global_model.pt"},
+    )
+
+
+@app.post("/update")
+async def receive_update(
+    background_tasks: BackgroundTasks,
+    client_id: str      = Form(...),
+    file:      UploadFile = File(...),
+):
     """
-    Background Task: Empties the queue safely, aggregates weights strictly on CPU,
-    updates the model, evaluates it, and stores everything in Supabase.
+    Receives a client's locally-trained .pt weight file.
+
+    Flow:
+        1. Deserialise weights.
+        2. Byzantine detection against current global model.
+        3. REJECT → log + return.
+        4. ACCEPT → enqueue; if queue >= MIN_AGGREGATE_SIZE, aggregate.
     """
-    global pending_updates, current_version_num, current_version_id
+    global pending_updates
+
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+
+    try:
+        raw = await file.read()
+        client_weights: Dict[str, torch.Tensor] = torch.load(
+            io.BytesIO(raw), weights_only=True, map_location="cpu"
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid weight file: {exc}")
 
     async with model_lock:
-        if len(pending_updates) < MIN_UPDATE_QUEUE:
-            return  # Should not realistically trigger
+        global_weights = global_model.get_weights()
+        curr_vid = current_version_id or ""
 
-        logger.info(f"Triggering Aggregation on {len(pending_updates)} clients...")
+    status, reason, norm_val, dist_val = detect_update(
+        client_weights, global_weights, cfg=runtime_cfg
+    )
 
-        # 1. Extract valid weights
-        updates_to_process = [u[1] for u in pending_updates]
-        accepted_clients_count = len(updates_to_process)
-
-        # 2. Aggregation Math (Trimmed Mean + Gaussian DP noise)
+    # DB log (best-effort — db errors must not crash the endpoint)
+    if storage:
         try:
-            aggregated_weights = dp_trimmed_mean(
-                updates_to_process,
-                trim_ratio=0.2,
-                clip_norm=DP_CLIP_NORM,
-                noise_multiplier=DP_NOISE_MULT,
-                enabled=DP_ENABLED,
-            )
-        except Exception as e:
-            logger.error(f"Aggregation Math Failed: {e}")
-            return
+            db_uuid = storage.register_client(client_id)
+            storage.log_client_update(curr_vid, db_uuid, status, norm_val, dist_val, reason)
+        except Exception as db_err:
+            logger.warning(f"DB log failed for {client_id}: {db_err}")
 
-        # Clear queue since we captured them
-        pending_updates.clear()
+    if status == "REJECT":
+        logger.warning(f"[Update] REJECT [{client_id}]: {reason}")
+        return {"status": "REJECT", "reason": reason}
 
-        # 3. Apply the Weights
-        global_model.set_weights(aggregated_weights)
-        current_version_num += 1
+    async with model_lock:
+        pending_updates.append((client_id, client_weights))
+        q = len(pending_updates)
+        logger.info(f"[Update] ACCEPT [{client_id}] — queue {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}")
 
-        # 4. Evaluate the new iteration (Takes time, but we are in background)
-        metrics = evaluate_model(global_model, val_loader)
+        if q >= runtime_cfg.MIN_AGGREGATE_SIZE:
+            batch = list(pending_updates)
+            pending_updates.clear()
+            background_tasks.add_task(_run_aggregation_sync, batch)
 
-        # 5. Db logging
-        new_vid = storage.save_model_version(aggregated_weights, current_version_num)
-
-        storage.log_aggregation(
-            new_vid,
-            accepted=accepted_clients_count,
-            rejected=0,
-            method="DP-TrimmedMean" if DP_ENABLED else "TrimmedMean",
-        )
-        storage.log_evaluation(new_vid, metrics["loss"], metrics["accuracy"])
-
-        current_version_id = new_vid
-        logger.info(
-            f"Aggregation Round {current_version_num} Complete! Loss: {metrics['loss']:.4f}, Acc: {metrics['accuracy']:.4f}"
-        )
+    return {"status": "ACCEPT", "message": "Update queued for aggregation."}
 
 
-# -------------------------------------------------------------
-# Endpoints
-# -------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Dashboard read endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/metrics")
 async def get_metrics():
-    """Endpoint for Dashboard Frontend."""
+    """Evaluation + aggregation history for the dashboard."""
     if not storage:
         raise HTTPException(500, "Storage uninitialized.")
-
     evals = (
         storage.supabase.table("evaluation_metrics")
-        .select("*")
-        .order("version_id", desc=True)
-        .limit(20)
-        .execute()
+        .select("*").order("version_id", desc=True).limit(20).execute()
     )
     aggs = (
         storage.supabase.table("aggregation_logs")
-        .select("*")
-        .order("version_id", desc=True)
-        .limit(20)
-        .execute()
+        .select("*").order("version_id", desc=True).limit(20).execute()
     )
-
     return {
-        "current_version": current_version_num,
-        "evaluations": evals.data,
-        "aggregations": aggs.data,
+        "current_version":    current_version_num,
+        "evaluations":        evals.data,
+        "aggregations":       aggs.data,
         "pending_queue_size": len(pending_updates),
     }
 
 
 @app.get("/clients")
 async def get_clients():
-    """Endpoint for Dashboard Edge Clients Page."""
+    """Recent client update attempts for the dashboard."""
     if not storage:
         raise HTTPException(500, "Storage uninitialized.")
-
     try:
-        # Get the latest 50 client update attempts
-        client_logs = (
+        rows = (
             storage.supabase.table("client_updates")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(50)
-            .execute()
+            .select("*").order("created_at", desc=True).limit(50).execute()
         )
-        return {"data": client_logs.data}
-    except Exception as e:
-        logger.error(f"Failed to fetch clients: {e}")
+        return {"data": rows.data}
+    except Exception as exc:
+        logger.error(f"Failed to fetch clients: {exc}")
         return {"data": []}
 
 
-@app.post("/update")
-async def receive_update(
-    background_tasks: BackgroundTasks,
-    client_id: str = Form(...),
-    file: UploadFile = File(...),
-):
-    """
-    Endpoint for edge clients to push their weights back asynchronously.
-    Reads a PyTorch .pt byte stream.
-    """
-    global pending_updates
-
+@app.get("/versions")
+async def get_versions():
+    """List all saved global model checkpoints."""
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
     try:
-        content = await file.read()
-        buffer = io.BytesIO(content)
-        client_weights = torch.load(buffer, weights_only=True)
-    except Exception as e:
-        raise HTTPException(400, f"Invalid PyTorch weight file: {e}")
-
-    # Enter lock just to grab the canonical weights to distance check against
-    async with model_lock:
-        global_weights = global_model.get_weights()
-        curr_vid = current_version_id
-
-    # Validation step
-    status, reason, norm_val, dist_val = detect_update(client_weights, global_weights)
-
-    # Store attempt to DB
-    storage.log_client_update(curr_vid, client_id, status, norm_val, dist_val, reason)
-
-    if status == "REJECT":
-        logger.warning(f"Rejected Client {client_id}: {reason}")
-        return {"status": "REJECT", "reason": reason}
-
-    # Queue updates securely
-    async with model_lock:
-        pending_updates.append((client_id, client_weights))
-        q_len = len(pending_updates)
-        logger.info(
-            f"Accepted Client {client_id}. Queue size: {q_len}/{MIN_UPDATE_QUEUE}"
+        rows = (
+            storage.supabase.table("model_versions")
+            .select("*").order("version_num", desc=True).limit(50).execute()
         )
-
-        # Fire background aggregation if threshold criteria hit
-        if q_len >= MIN_UPDATE_QUEUE:
-            background_tasks.add_task(trigger_aggregation)
-
-    return {"status": "ACCEPT", "message": "Update queued."}
+        return {"data": rows.data}
+    except Exception as exc:
+        logger.error(f"Failed to fetch versions: {exc}")
+        return {"data": []}
 
 
-# -------------------------------------------------------------
-# Local Simulation Helper
-# -------------------------------------------------------------
+@app.get("/model/download")
+async def download_global_model(version_id: str = None):
+    """Download a specific (or latest) global model checkpoint."""
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
+    try:
+        if version_id:
+            row = (
+                storage.supabase.table("model_versions")
+                .select("file_path").eq("id", version_id).single().execute()
+            )
+            file_path = row.data.get("file_path") if row.data else None
+        else:
+            file_path = storage.get_latest_version().get("file_path")
+
+        if file_path and os.path.exists(file_path):
+            return FileResponse(
+                path=file_path,
+                filename=os.path.basename(file_path),
+                media_type="application/octet-stream",
+            )
+        raise HTTPException(404, "Model file not found on disk.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Download error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Simulation  (demo / testing  — fires a real training loop)
+# ---------------------------------------------------------------------------
+
 class SimulationRequest(BaseModel):
-    client_name: str
-    is_malicious: bool = False
-    malicious_multiplier: float = 50.0
+    client_name:          str
+    is_malicious:         bool  = False
+    malicious_multiplier: float = cfg.NORM_THRESHOLD * 3
 
 
 @app.post("/simulate")
-async def run_local_simulation(
-    background_tasks: BackgroundTasks, req: SimulationRequest
-):
+async def run_simulation(background_tasks: BackgroundTasks, req: SimulationRequest):
     """
-    Kicks off an authentic PyTorch local training routine on a thread in the background,
-    then fires it to the primary /update endpoint locally.
+    Fires a real local PyTorch training run in a background thread.
+    Uses the same global model + FLSettings as real clients.
+    Malicious clients inject large Gaussian noise before submission.
     """
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+    def _worker(name: str, malicious: bool, mult: float, vid):
+        import asyncio as _as
+        from clients.local_training import get_updated_weights
 
-    def local_train_worker(name: str, malicious: bool, mult: float, vid: int):
-        logger.info(f"Starting simulated local training for MOCK-{name}")
+        logger.info(f"[Sim] Starting {name}")
+        db_client_id = storage.register_client(f"MOCK-{name}") if storage else name
 
-        db_client_id = storage.register_client(f"MOCK-{name}")
+        gw = _as.run(_async_get_weights())
 
-        # Emulate loading from API
-        local_model = CNNModel()
+        # Build a local copy of the global model
+        local_m = build_model(
+            input_shape=global_model.input_shape,
+            num_classes=global_model.num_classes,
+            hidden_dims=cfg.hidden_dims(),
+        )
+        local_m.set_weights(gw)
+        local_m.train()
 
-        async def fetch_w():
-            async with model_lock:
-                return global_model.get_weights()
-
-        # Simple local training loop on 1 batch of pure noise (representing decoupled data)
-        # Using real PyTorch grad backprop to drift the model authentically!
-        weights_to_train = asyncio.run(fetch_w())
-        local_model.set_weights(weights_to_train)
-        local_model.train()
-
-        optimizer = torch.optim.SGD(local_model.parameters(), lr=0.01)
+        optimizer = torch.optim.SGD(local_m.parameters(),
+                                    lr=cfg.LEARNING_RATE, momentum=0.9)
         criterion = torch.nn.CrossEntropyLoss()
 
-        # Synthesize real training drift (non-iid simulation)
-        for _ in range(5):
-            inputs = torch.randn(16, 1, 28, 28)
-            targets = torch.randint(0, 10, (16,))
+        # Synthetic mini-batches shaped to match the model's input_shape
+        c, *spatial = global_model.input_shape if len(global_model.input_shape) == 3 else (global_model.input_shape[0],)
+        batch_shape = (16, *global_model.input_shape)
 
+        for _ in range(5):
+            inputs  = torch.randn(*batch_shape)
+            targets = torch.randint(0, global_model.num_classes, (16,))
             optimizer.zero_grad()
-            outputs = local_model(inputs)
-            loss = criterion(outputs, targets)
+            loss = criterion(local_m(inputs), targets)
             loss.backward()
             optimizer.step()
 
-        client_weights = local_model.get_weights()
+        weights = get_updated_weights(local_m)
 
         if malicious:
-            for key in client_weights.keys():
-                client_weights[key] += torch.randn_like(client_weights[key]) * mult
+            for key in weights:
+                weights[key] += torch.randn_like(weights[key]) * mult
 
-        # Manually invoke the pipeline via memory bypassing REST (to keep file parsing simple in simulation)
-        status, reason, norm_val, dist_val = detect_update(
-            client_weights, asyncio.run(fetch_w())
-        )
-        storage.log_client_update(vid, db_client_id, status, norm_val, dist_val, reason)
-
-        async def handle_valid():
-            global pending_updates
-            async with model_lock:
-                pending_updates.append((db_client_id, client_weights))
-                if len(pending_updates) >= MIN_UPDATE_QUEUE:
-                    await trigger_aggregation()
+        status, reason, norm_val, dist_val = detect_update(weights, gw, cfg=runtime_cfg)
+        if storage:
+            try:
+                storage.log_client_update(vid, db_client_id, status, norm_val, dist_val, reason)
+            except Exception:
+                pass
 
         if status == "ACCEPT":
-            asyncio.run(handle_valid())
-
-        logger.info(f"Simulation MOCK-{name} finished. Result: {status}")
+            _as.run(_enqueue_and_aggregate(db_client_id, weights))
+        logger.info(f"[Sim] {name} → {status}")
 
     background_tasks.add_task(
-        local_train_worker,
-        req.client_name,
-        req.is_malicious,
-        req.malicious_multiplier,
-        current_version_id,
+        _worker, req.client_name, req.is_malicious,
+        req.malicious_multiplier, current_version_id,
     )
-    return {"status": "Simulating in background"}
+    return {"status": "Simulation started in background."}
+
+
+async def _async_get_weights() -> Dict[str, torch.Tensor]:
+    async with model_lock:
+        return global_model.get_weights()
+
+
+async def _enqueue_and_aggregate(client_id: str, weights: Dict[str, torch.Tensor]):
+    global pending_updates
+    async with model_lock:
+        pending_updates.append((client_id, weights))
+        if len(pending_updates) >= runtime_cfg.MIN_AGGREGATE_SIZE:
+            batch = list(pending_updates)
+            pending_updates.clear()
+            await _aggregate_and_update(batch)
+
+
+# ---------------------------------------------------------------------------
+# Admin config  (hot-update DP/queue settings without restart)
+# ---------------------------------------------------------------------------
+
+class ConfigUpdate(BaseModel):
+    dp_enabled:       bool  = False
+    dp_clip_norm:     float = 10.0
+    dp_noise_mult:    float = 1.0
+    min_update_queue: int   = 1
+
+
+@app.get("/admin/config")
+async def get_config():
+    return {
+        "dp_enabled":       runtime_cfg.DP_ENABLED,
+        "dp_clip_norm":     runtime_cfg.DP_CLIP_NORM,
+        "dp_noise_mult":    runtime_cfg.DP_NOISE_MULT,
+        "min_update_queue": runtime_cfg.MIN_AGGREGATE_SIZE,
+    }
+
+
+@app.post("/admin/config")
+async def set_config(update: ConfigUpdate):
+    """Hot-updates runtime DP & queue settings in memory (no restart needed)."""
+    global runtime_cfg
+    # Create a patched copy using model_copy (Pydantic v2)
+    runtime_cfg = runtime_cfg.model_copy(update={
+        "DP_ENABLED":       update.dp_enabled,
+        "DP_CLIP_NORM":     update.dp_clip_norm,
+        "DP_NOISE_MULT":    update.dp_noise_mult,
+        "MIN_AGGREGATE_SIZE": update.min_update_queue,
+    })
+    logger.info(
+        f"[Config] Updated: DP={runtime_cfg.DP_ENABLED}, "
+        f"clip={runtime_cfg.DP_CLIP_NORM}, σ={runtime_cfg.DP_NOISE_MULT}, "
+        f"queue={runtime_cfg.MIN_AGGREGATE_SIZE}"
+    )
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Dataset upload + per-client weight serving
+# ---------------------------------------------------------------------------
+
+def _train_client_background(client_id: str, file_path: str):
+    """
+    Background task triggered by CSV upload from the frontend.
+
+    Full pipeline:
+      1. Parse CSV → detect input_dim + num_classes automatically.
+      2. If no global model exists yet, build one from the detected shape.
+      3. Train locally on the uploaded data using real PyTorch.
+      4. Submit the trained weights into the aggregation pipeline.
+      5. Aggregate → update global model → evaluate → store metrics.
+    
+    This means: uploading a CSV from the dashboard is enough to
+    populate all graphs with real accuracy/loss data. No DATASET_NAME needed.
+    """
+    import asyncio as _as
+
+    logger.info(f"[BG Train] Starting for {client_id} on {file_path}")
+    try:
+        from clients.csv_trainer import (
+            _sniff_csv, _build_label_map, UniversalCSVDataset, train_on_csv,
+        )
+
+        # ── Step 1: Detect CSV shape ─────────────────────────────────────────
+        has_header, num_features = _sniff_csv(file_path)
+        label_map   = _build_label_map(file_path, has_header)
+        num_classes = len(label_map)
+        logger.info(
+            f"[BG Train] CSV detected: features={num_features}, "
+            f"classes={num_classes}"
+        )
+
+        # ── Step 2: Auto-build global model if none exists ───────────────────
+        global global_model, val_loader
+        if global_model is None:
+            import math
+            side = int(math.isqrt(num_features))
+            is_image = (side * side == num_features and side >= 8)
+            input_shape = (1, side, side) if is_image else (num_features,)
+
+            new_model = build_model(
+                input_shape = input_shape,
+                num_classes = num_classes,
+                hidden_dims = cfg.hidden_dims(),
+            )
+            logger.info(f"[BG Train] Built global model from CSV: {new_model}")
+
+            # Build a validation loader from 20% of this CSV
+            dataset = UniversalCSVDataset(file_path, label_map, has_header)
+            n_val   = max(1, int(len(dataset) * cfg.TEST_SPLIT_RATIO))
+            n_train = len(dataset) - n_val
+            from torch.utils.data import random_split
+            _, val_subset = random_split(
+                dataset, [n_train, n_val],
+                generator=torch.Generator().manual_seed(42),
+            )
+            new_val_loader = DataLoader(
+                val_subset, batch_size=cfg.BATCH_SIZE, shuffle=False
+            )
+
+            # Atomically set the global model + val loader
+            loop = _as.new_event_loop()
+            async def _set_model():
+                async with model_lock:
+                    global global_model, val_loader
+                    global_model = new_model
+                    val_loader   = new_val_loader
+            loop.run_until_complete(_set_model())
+            loop.close()
+            logger.info("[BG Train] Global model + validation loader initialised.")
+
+            # Save initial version to DB
+            if storage:
+                loop2 = _as.new_event_loop()
+                loop2.run_until_complete(_init_fresh_model())
+                loop2.close()
+
+        # ── Step 3: Get current global weights ───────────────────────────────
+        gw = _as.run(_async_get_weights())
+
+        # ── Step 4: Train on the CSV ─────────────────────────────────────────
+        saved_path = train_on_csv(
+            client_id      = client_id,
+            csv_path       = file_path,
+            global_weights = gw,
+            epochs         = cfg.BG_TRAIN_EPOCHS,
+            device         = cfg.DEVICE,
+        )
+
+        if not saved_path:
+            logger.warning(f"[BG Train] ⚠️ No weights produced for {client_id}")
+            return
+
+        # ── Step 5: Load the trained weights ─────────────────────────────────
+        checkpoint = torch.load(saved_path, weights_only=True, map_location="cpu")
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            client_weights = checkpoint["state_dict"]
+        else:
+            client_weights = checkpoint
+
+        # ── Step 6: Feed into aggregation pipeline ───────────────────────────
+        # (detect → accept/reject → aggregate → evaluate → store)
+        from server.detection import detect_update as _detect
+        global_weights = _as.run(_async_get_weights())
+
+        status, reason, norm_val, dist_val = _detect(
+            client_weights, global_weights, cfg=runtime_cfg
+        )
+
+        if storage:
+            try:
+                db_id = storage.register_client(client_id)
+                storage.log_client_update(
+                    current_version_id or "", db_id,
+                    status, norm_val, dist_val, reason,
+                )
+            except Exception:
+                pass
+
+        if status == "ACCEPT":
+            logger.info(f"[BG Train] ✅ Weights accepted, feeding into aggregation.")
+            _as.run(_enqueue_and_aggregate(client_id, client_weights))
+        else:
+            logger.warning(f"[BG Train] ⚠️ Weights rejected: {reason}")
+
+        logger.info(f"[BG Train] ✅ Complete for {client_id}")
+
+    except Exception as exc:
+        logger.error(f"[BG Train] ❌ {client_id}: {exc}", exc_info=True)
+
+
+@app.post("/api/dataset/upload")
+async def upload_dataset(
+    background_tasks: BackgroundTasks,
+    client_id:   str        = Form(...),
+    file:        UploadFile = File(None),
+    dataset_url: str        = Form(None),
+):
+    """Upload a dataset (file or URL) and trigger background local training."""
+    if not file and not dataset_url:
+        raise HTTPException(400, "Provide file or dataset_url.")
+
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
+    os.makedirs(client_dir, exist_ok=True)
+    file_path = ""
+
+    if file:
+        file_path = os.path.join(client_dir, file.filename or "dataset.csv")
+        # Stream-write in 1 MB chunks — avoids OOM for large files
+        CHUNK = 1024 * 1024
+        with open(file_path, "wb") as out:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                out.write(chunk)
+        logger.info(f"Dataset '{file.filename}' saved for {client_id} (streaming).")
+
+    elif dataset_url:
+        parsed    = urlparse(dataset_url)
+        filename  = os.path.basename(parsed.path) or "dataset.csv"
+        file_path = os.path.join(client_dir, filename)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        req = urllib.request.Request(dataset_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, context=ctx) as resp, \
+             open(file_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        logger.info(f"Dataset downloaded from {dataset_url} for {client_id}.")
+
+    background_tasks.add_task(_train_client_background, client_id, file_path)
+    return {"message": "Dataset received. Background training started."}
+
+
+@app.get("/api/model/weights/{client_id}")
+async def get_client_weights(client_id: str):
+    """Download the locally-trained .pt file for a specific client."""
+    client_dir   = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
+    if os.path.exists(weights_path):
+        return FileResponse(
+            weights_path,
+            filename=f"weights_{client_id}.pt",
+            media_type="application/octet-stream",
+        )
+    raise HTTPException(404, "Weights not found — training may still be in progress.")
