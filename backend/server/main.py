@@ -128,35 +128,39 @@ async def startup_event():
     except Exception as exc:
         logger.error(f"SupabaseManager init failed: {exc}")
 
-    # ── 2 & 3. Dataset → model ────────────────────────────────────────────────
+    # ── 2 & 3. Dataset → model (only if DATASET_NAME is configured) ─────────
     ssl._create_default_https_context = ssl._create_unverified_context
-    try:
-        logger.info(f"Loading dataset '{cfg.DATASET_NAME}' …")
-        ds_result = load_dataset(cfg)
-        input_shape = ds_result["input_shape"]
-        num_classes = ds_result["num_classes"]
-        val_loader  = ds_result["val_dataloader"]
-    except Exception as exc:
-        logger.error(f"Dataset load failed: {exc}. Falling back to MNIST defaults.")
-        # Absolute fallback — only if env has a misconfigured dataset
-        from torchvision import datasets as tv_datasets, transforms
-        _transform  = transforms.Compose([transforms.ToTensor(),
-                                          transforms.Normalize((0.5,), (0.5,))])
-        _val_ds     = tv_datasets.MNIST(cfg.DATASET_ROOT, train=False,
-                                        download=True, transform=_transform)
-        val_loader  = DataLoader(_val_ds, batch_size=cfg.BATCH_SIZE, shuffle=False)
-        input_shape = (1, 28, 28)
-        num_classes = 10
 
-    global_model = build_model(
-        input_shape  = input_shape,
-        num_classes  = num_classes,
-        hidden_dims  = cfg.hidden_dims(),
-    )
-    logger.info(f"Global model built: {global_model}")
+    if cfg.DATASET_NAME.strip():
+        try:
+            logger.info(f"Loading dataset '{cfg.DATASET_NAME}' …")
+            ds_result   = load_dataset(cfg)
+            input_shape = ds_result["input_shape"]
+            num_classes = ds_result["num_classes"]
+            val_loader  = ds_result["val_dataloader"]
+        except Exception as exc:
+            logger.error(f"Dataset load failed: {exc}.")
+            input_shape = None
+            num_classes = None
+    else:
+        logger.info("DATASET_NAME is empty — skipping auto-download. "
+                     "Model will be built when a client uploads data.")
+        input_shape = None
+        num_classes = None
+
+    if input_shape and num_classes:
+        global_model = build_model(
+            input_shape = input_shape,
+            num_classes = num_classes,
+            hidden_dims = cfg.hidden_dims(),
+        )
+    if global_model:
+        logger.info(f"Global model built: {global_model}")
+    else:
+        logger.info("No model built — waiting for client dataset upload.")
 
     # ── 4. Restore checkpoint from DB ────────────────────────────────────────
-    if storage:
+    if storage and global_model:
         latest = storage.get_latest_version()
         if latest["version_num"] > 0 and latest["file_path"] and os.path.exists(latest["file_path"]):
             try:
