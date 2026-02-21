@@ -2,6 +2,12 @@ import os
 import io
 import asyncio
 import logging
+import urllib.request
+from urllib.parse import urlparse
+import ssl
+import asyncio
+import logging
+import shutil
 from typing import Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
@@ -275,6 +281,7 @@ async def upload_dataset(
         logger.info(f"Dataset downloaded from {dataset_url} for client {client_id}")
     
     # Trigger background training
+    from clients.trainer import train_client_background
     background_tasks.add_task(train_client_background, client_id, file_path)
     
     return {"message": "Dataset uploaded successfully. Background training started."}
