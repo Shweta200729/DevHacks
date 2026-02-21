@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BorderBeam } from "@/components/ui/border-beam";
 import {
     Activity, Network, ShieldCheck, Cpu, ArrowUpRight, CopyCheck,
-    AlertTriangle, TrendingDown, TrendingUp, Zap, Clock, CheckCircle2
+    AlertTriangle, TrendingDown, TrendingUp, Zap, Clock, CheckCircle2, Wallet, FileText
 } from "lucide-react";
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -19,8 +19,14 @@ interface MetricsData {
     pending_queue_size: number;
 }
 
+interface BlockchainData {
+    wallets: any[];
+    recent_transactions: any[];
+}
+
 export default function OverviewPage() {
     const [data, setData] = useState<MetricsData | null>(null);
+    const [blockchainData, setBlockchainData] = useState<BlockchainData | null>(null);
     const [loading, setLoading] = useState(true);
     // Upload section state
     const [uploadClientId, setUploadClientId] = useState("");
@@ -38,8 +44,16 @@ export default function OverviewPage() {
                 json.evaluations = [...json.evaluations].reverse();
                 json.aggregations = [...json.aggregations].reverse();
                 setData(json as MetricsData);
-                setLastUpdated(new Date());
             }
+
+            // Poll Blockchain Economy
+            const bcRes = await fetch("http://localhost:8000/fl/blockchain/status");
+            if (bcRes.ok) {
+                const bcJson = await bcRes.json();
+                setBlockchainData(bcJson);
+            }
+
+            setLastUpdated(new Date());
         } catch (e) {
             console.error("Failed fetching metrics", e);
         } finally {
@@ -513,6 +527,108 @@ export default function OverviewPage() {
                     </CardContent>
                 </Card>
             </div>
+
+            {/* ── Blockchain / Token Economy Panel ─────────────────────────────────── */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                {/* Economy Wallets */}
+                <Card className="bg-white border-slate-200 shadow-sm lg:col-span-2">
+                    <CardHeader>
+                        <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+                            <Wallet className="w-5 h-5 text-indigo-500" />
+                            Web3 Token Economy (FLT)
+                        </CardTitle>
+                        <p className="text-sm text-slate-500 mt-1">
+                            Live nodes holding automated smart-contract stakes on the local EVM.
+                        </p>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                        <div className="overflow-x-auto rounded-b-lg border-t border-slate-100">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-xs">
+                                    <tr>
+                                        <th className="px-5 py-3 font-semibold">Client ID</th>
+                                        <th className="px-5 py-3 font-semibold">Wallet Address</th>
+                                        <th className="px-5 py-3 font-semibold text-right">Staked</th>
+                                        <th className="px-5 py-3 font-semibold text-right">Balance</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {blockchainData?.wallets && blockchainData.wallets.length > 0 ? (
+                                        blockchainData.wallets.map((w, i) => (
+                                            <tr key={i} className="hover:bg-slate-50 transition-colors">
+                                                <td className="px-5 py-3 font-medium text-slate-900 text-xs">{w.client_id}</td>
+                                                <td className="px-5 py-3 font-mono text-slate-400 text-xs">{w.wallet}</td>
+                                                <td className="px-5 py-3 text-right">
+                                                    <span className="font-semibold text-indigo-600">{w.staked} FLT</span>
+                                                </td>
+                                                <td className="px-5 py-3 text-right text-slate-700 font-medium">
+                                                    {w.balance} FLT
+                                                </td>
+                                            </tr>
+                                        ))
+                                    ) : (
+                                        <tr><td colSpan={4} className="px-5 py-8 text-center text-slate-400">No active wallets yet.</td></tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                {/* Smart Contract Events */}
+                <Card className="bg-white border-slate-200 shadow-sm">
+                    <CardHeader>
+                        <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+                            <FileText className="w-5 h-5 text-indigo-500" />
+                            Live EVM Transactions
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                        <div className="h-64 overflow-y-auto">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[10px] sticky top-0">
+                                    <tr>
+                                        <th className="px-4 py-2 font-semibold">Event</th>
+                                        <th className="px-4 py-2 font-semibold text-right">Amt</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {blockchainData?.recent_transactions && blockchainData.recent_transactions.length > 0 ? (
+                                        blockchainData.recent_transactions.map((tx, i) => (
+                                            <tr key={i} className="hover:bg-slate-50 transition-colors">
+                                                <td className="px-4 py-3">
+                                                    <div className="flex flex-col gap-1">
+                                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold self-start border ${tx.action === 'STAKE' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                                                                tx.action === 'REWARD' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                                    'bg-red-50 text-red-700 border-red-200'
+                                                            }`}>
+                                                            {tx.action}
+                                                        </span>
+                                                        <span className="font-mono text-[10px] text-slate-400 truncate w-32" title={tx.tx_hash}>
+                                                            {tx.tx_hash.substring(0, 16)}...
+                                                        </span>
+                                                        <span className="text-xs font-semibold text-slate-600">{tx.client_id}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-3 text-right">
+                                                    <span className={`font-bold ${tx.action === 'SLASH' ? 'text-red-500' : 'text-slate-700'}`}>
+                                                        {tx.action === 'SLASH' ? '-' : '+'}{tx.amount}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    ) : (
+                                        <tr><td colSpan={2} className="px-4 py-8 text-center text-slate-400 text-xs">No transactions in the pool.</td></tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </CardContent>
+                </Card>
+
+            </div>
+
         </div>
     );
 }
