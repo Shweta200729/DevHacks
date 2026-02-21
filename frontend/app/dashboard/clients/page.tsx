@@ -21,6 +21,7 @@ export default function ClientsPage() {
     // Dataset Upload State
     const [uploadClientId, setUploadClientId] = useState("");
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [datasetUrl, setDatasetUrl] = useState("");
     const [isUploading, setIsUploading] = useState(false);
     const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "info", msg: string } | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -80,8 +81,8 @@ export default function ClientsPage() {
     };
 
     const handleDatasetUpload = async () => {
-        if (!uploadClientId || !selectedFile) {
-            setUploadStatus({ type: "error", msg: "Please provide both Client ID and a dataset file." });
+        if (!uploadClientId || (!selectedFile && !datasetUrl)) {
+            setUploadStatus({ type: "error", msg: "Please provide a Client ID and either a dataset file or URL." });
             return;
         }
 
@@ -90,7 +91,8 @@ export default function ClientsPage() {
 
         const formData = new FormData();
         formData.append("client_id", uploadClientId);
-        formData.append("file", selectedFile);
+        if (selectedFile) formData.append("file", selectedFile);
+        if (datasetUrl) formData.append("dataset_url", datasetUrl);
 
         try {
             const res = await fetch("http://localhost:8000/fl/api/dataset/upload", {
@@ -102,6 +104,7 @@ export default function ClientsPage() {
                 setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
                 if (fileInputRef.current) fileInputRef.current.value = "";
                 setSelectedFile(null);
+                setDatasetUrl("");
             } else {
                 const data = await res.json();
                 setUploadStatus({ type: "error", msg: data.detail || "Failed to upload dataset." });
@@ -211,13 +214,21 @@ export default function ClientsPage() {
                             </div>
 
                             <div className="flex flex-col gap-2">
-                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Dataset File</label>
-                                <div className="flex items-center gap-2">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Dataset File OR URL</label>
+                                <div className="flex flex-col gap-2">
                                     <input
                                         type="file"
                                         ref={fileInputRef}
                                         onChange={handleFileChange}
                                         className="text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 transition-all cursor-pointer"
+                                    />
+                                    <div className="text-xs text-slate-400 font-medium tracking-wide">— OR —</div>
+                                    <input
+                                        type="text"
+                                        placeholder="https://example.com/dataset.csv"
+                                        value={datasetUrl}
+                                        onChange={(e) => setDatasetUrl(e.target.value)}
+                                        className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 w-64 transition-all text-sm"
                                     />
                                 </div>
                             </div>

@@ -230,6 +230,56 @@ async def get_clients():
         return {"data": []}
 
 
+@app.post("/api/dataset/upload")
+async def upload_dataset(
+    background_tasks: BackgroundTasks,
+    client_id: str = Form(...),
+    file: UploadFile = File(None),
+    dataset_url: str = Form(None),
+):
+    """
+    Uploads a dataset for a specific client (via file upload or URL) and triggers background training.
+    """
+    if not file and not dataset_url:
+        raise HTTPException(status_code=400, detail="Either a file or a dataset_url must be provided.")
+
+    client_dir = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    os.makedirs(client_dir, exist_ok=True)
+    
+    file_path = ""
+    if file:
+        file_path = os.path.join(client_dir, file.filename)
+        # Save the file
+        try:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+            
+        logger.info(f"Dataset {file.filename} saved for client {client_id}")
+    elif dataset_url:
+        parsed_url = urlparse(dataset_url)
+        filename = os.path.basename(parsed_url.path) or "downloaded_dataset.csv"
+        file_path = os.path.join(client_dir, filename)
+        
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(dataset_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ctx) as response, open(file_path, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to download from URL: {e}")
+            
+        logger.info(f"Dataset downloaded from {dataset_url} for client {client_id}")
+    
+    # Trigger background training
+    background_tasks.add_task(train_client_background, client_id, file_path)
+    
+    return {"message": "Dataset uploaded successfully. Background training started."}
+
+
 @app.post("/update")
 async def receive_update(
     background_tasks: BackgroundTasks,
