@@ -1,112 +1,125 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BorderBeam } from "@/components/ui/border-beam";
-import { Activity, Network, ShieldCheck, Cpu, ArrowUpRight, CopyCheck } from "lucide-react";
+import { Activity, Network, ShieldCheck, Cpu, ArrowUpRight, CopyCheck, Wifi } from "lucide-react";
 import {
-    LineChart,
-    Line,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    ResponsiveContainer,
-    Legend
+    LineChart, Line, XAxis, YAxis, CartesianGrid,
+    Tooltip, ResponsiveContainer
 } from "recharts";
-
-interface MetricsData {
-    current_version: number;
-    evaluations: any[];
-    aggregations: any[];
-    pending_queue_size: number;
-}
+import {
+    fetchMetrics, MetricsResponse, EvalRow, AggRow, startPolling
+} from "@/lib/api";
 
 export default function OverviewPage() {
-    const [data, setData] = useState<MetricsData | null>(null);
+    const [data, setData] = useState<MetricsResponse | null>(null);
     const [loading, setLoading] = useState(true);
+    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-    const fetchMetrics = async () => {
-        try {
-            const res = await fetch("http://localhost:8000/fl/metrics");
-            if (res.ok) {
-                const json = await res.json();
-                json.evaluations = json.evaluations.reverse();
-                json.aggregations = json.aggregations.reverse();
-                setData(json);
-            }
-        } catch (e) {
-            console.error("Failed fetching metrics", e);
-        } finally {
-            setLoading(false);
+    const load = useCallback(async () => {
+        const json = await fetchMetrics();
+        if (json) {
+            // chronological order for charts (oldest → newest)
+            json.evaluations = [...json.evaluations].reverse();
+            json.aggregations = [...json.aggregations].reverse();
+            setData(json);
+            setLastUpdated(new Date());
         }
-    };
-
-    useEffect(() => {
-        fetchMetrics();
-        const interval = setInterval(fetchMetrics, 3000);
-        return () => clearInterval(interval);
+        setLoading(false);
     }, []);
 
-    const calculateTotalClients = () => {
-        if (!data?.aggregations) return { acc: 0, rej: 0, active: 0 };
-        let acc = 0;
-        let rej = 0;
-        data.aggregations.forEach(a => {
-            acc += a.total_accepted;
-            rej += a.total_rejected; // If available directly, else calculate from DB logs
-        });
-        return { acc, rej, active: Math.max(1248, acc * 4) }; // Faux active scale for visual demo
-    };
+    useEffect(() => startPolling(load, 3000), [load]);
 
-    const stats = calculateTotalClients();
-
-    // Safety fallback latest values 
-    const latestEval = data?.evaluations?.length ? data.evaluations[data.evaluations.length - 1] : null;
-    const latestAgg = data?.aggregations?.length ? data.aggregations[data.aggregations.length - 1] : null;
+    // ── derived values ─────────────────────────────────────────────────────────
+    const totalAccepted = data?.aggregations.reduce((s, a) => s + a.total_accepted, 0) ?? 0;
+    const totalRejected = data?.aggregations.reduce((s, a) => s + a.total_rejected, 0) ?? 0;
+    const latestEval = data?.evaluations.at(-1) ?? null;
+    const latestAgg = data?.aggregations.at(-1) ?? null;
 
     const kpis = [
-        { title: "Current Model Version", value: `v${data?.current_version || 0}`, icon: Network, trend: "Live Synced" },
-        { title: "Aggregation Method", value: latestAgg?.method || "Trimmed Mean", icon: Cpu, trend: "DP layer enabled" },
-        { title: "Total Valid Updates", value: stats.acc.toString(), icon: Activity, trend: `Queue: ${data?.pending_queue_size || 0}` },
-        { title: "Rejected Updates", value: stats.rej.toString(), icon: ShieldCheck, trend: "Malicious payloads blocked", highlight: true },
-        { title: "Latest Accuracy", value: latestEval ? `${(latestEval.accuracy * 100).toFixed(2)}%` : "N/A", icon: CopyCheck, trend: "Validated on MNIST test set", highlightKey: true },
+        {
+            title: "Model Version",
+            value: `v${data?.current_version ?? 0}`,
+            icon: Network,
+            trend: "Active global checkpoint",
+        },
+        {
+            title: "Aggregation Method",
+            value: latestAgg?.method ?? "—",
+            icon: Cpu,
+            trend: "DP noise layer active",
+        },
+        {
+            title: "Valid Updates",
+            value: totalAccepted.toString(),
+            icon: Activity,
+            trend: `Queue: ${data?.pending_queue_size ?? 0} pending`,
+        },
+        {
+            title: "Rejected (Byzantine)",
+            value: totalRejected.toString(),
+            icon: ShieldCheck,
+            trend: "Malicious payloads blocked",
+            highlight: true,
+        },
+        {
+            title: "Latest Accuracy",
+            value: latestEval ? `${(latestEval.accuracy * 100).toFixed(2)}%` : "—",
+            icon: CopyCheck,
+            trend: "Validated on MNIST test set",
+            highlightKey: true,
+        },
     ];
 
-    // Build mixed activity timeline
-    const activityFeed: { event: string; details: string; status: string; time: string }[] = [];
-    if (data?.aggregations) {
-        data.aggregations.slice().reverse().forEach((agg) => {
-            activityFeed.push({
-                event: "Global Model Updated",
-                details: `Version v${agg.version_id} compiled using ${agg.method}`,
-                status: "Success",
-                time: `Round ${agg.version_id}`
-            });
-        });
-    }
+    // ── activity feed from real aggregation rows ───────────────────────────────
+    const activityRows = [...(data?.aggregations ?? [])].reverse().slice(0, 6).map(agg => ({
+        event: "Global Model Aggregated",
+        details: `v${agg.version_id} via ${agg.method} — ${agg.total_accepted} accepted, ${agg.total_rejected} rejected`,
+        status: "Success",
+        time: agg.created_at ? new Date(agg.created_at).toLocaleTimeString() : `Round ${agg.version_id}`,
+    }));
 
     return (
         <div className="flex flex-col gap-8 pb-10">
+            {/* Header */}
             <div className="flex items-center justify-between">
                 <div className="flex flex-col gap-2">
-                    <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">Global System Overview</h2>
-                    <p className="text-slate-500">Real-time metrics for your federated learning infrastructure.</p>
+                    <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">
+                        Global System Overview
+                    </h2>
+                    <p className="text-slate-500">
+                        Real-time metrics from your federated learning infrastructure.
+                    </p>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <Wifi className={`w-3.5 h-3.5 ${data ? "text-green-500" : "text-slate-300"}`} />
+                    {lastUpdated
+                        ? `Updated ${lastUpdated.toLocaleTimeString()}`
+                        : loading ? "Connecting…" : "No data"}
                 </div>
             </div>
 
-            {/* KPI Section */}
+            {/* KPIs */}
             <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
                 {kpis.map((kpi, i) => (
-                    <Card key={i} className={`relative overflow-hidden transition-all duration-300 hover:shadow-md hover:-translate-y-0.5 ${kpi.highlightKey ? 'border-blue-200 bg-blue-50/30' : 'bg-white border-slate-200'}`}>
+                    <Card
+                        key={i}
+                        className={`relative overflow-hidden transition-all duration-300 hover:shadow-md hover:-translate-y-0.5
+                            ${kpi.highlightKey ? "border-blue-200 bg-blue-50/30"
+                                : kpi.highlight ? "border-red-100 bg-red-50/20"
+                                    : "bg-white border-slate-200"}`}
+                    >
                         {kpi.highlightKey && <BorderBeam duration={8} size={150} />}
                         <CardHeader className="flex flex-row items-center justify-between pb-2">
                             <CardTitle className="text-sm font-medium text-slate-500">{kpi.title}</CardTitle>
                             <kpi.icon className={`h-4 w-4 ${kpi.highlightKey ? "text-blue-600" : kpi.highlight ? "text-red-500" : "text-slate-400"}`} />
                         </CardHeader>
                         <CardContent>
-                            <div className={`text-2xl font-bold ${kpi.highlightKey ? 'text-blue-700' : kpi.highlight ? 'text-red-600' : 'text-slate-900'}`}>{kpi.value}</div>
+                            <div className={`text-2xl font-bold ${kpi.highlightKey ? "text-blue-700" : kpi.highlight ? "text-red-600" : "text-slate-900"}`}>
+                                {kpi.value}
+                            </div>
                             <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                                {i === 2 || i === 4 ? <ArrowUpRight className="h-3 w-3 text-green-500" /> : null}
+                                {i === 2 && <ArrowUpRight className="h-3 w-3 text-green-500" />}
                                 {kpi.trend}
                             </p>
                         </CardContent>
@@ -114,27 +127,33 @@ export default function OverviewPage() {
                 ))}
             </div>
 
-            {/* Charts Section */}
+            {/* Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <Card className="bg-white border-slate-200 shadow-sm relative overflow-hidden">
                     <CardHeader>
-                        <CardTitle className="text-lg font-bold text-slate-900">Convergence (Accuracy vs Rounds)</CardTitle>
+                        <CardTitle className="text-lg font-bold text-slate-900">Convergence (Accuracy per Round)</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-2">
-                            <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={data?.evaluations || []}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                                    <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={(t) => `v${t}`} />
-                                    <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(t) => `${(t * 100).toFixed(0)}%`} domain={[0, 1]} />
-                                    <Tooltip
-                                        contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                                        itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-                                        formatter={(value) => [value !== undefined ? `${(Number(value) * 100).toFixed(2)}%` : '', 'Accuracy']}
-                                    />
-                                    <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3} dot={{ fill: "#2563eb", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
-                                </LineChart>
-                            </ResponsiveContainer>
+                        <div className="h-64 w-full rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                            {(data?.evaluations.length ?? 0) > 0 ? (
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={data!.evaluations}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                                        <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={t => `v${t}`} />
+                                        <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} domain={[0, 1]} tickFormatter={t => `${(t * 100).toFixed(0)}%`} />
+                                        <Tooltip
+                                            contentStyle={{ backgroundColor: "#fff", borderColor: "#e2e8f0", borderRadius: "8px" }}
+                                            formatter={(v: number) => [`${(v * 100).toFixed(2)}%`, "Accuracy"]}
+                                        />
+                                        <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3}
+                                            dot={{ fill: "#2563eb", r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            ) : (
+                                <div className="flex h-full items-center justify-center text-slate-400 text-sm">
+                                    No evaluation data yet — run a simulation or upload a dataset.
+                                </div>
+                            )}
                         </div>
                     </CardContent>
                 </Card>
@@ -144,26 +163,32 @@ export default function OverviewPage() {
                         <CardTitle className="text-lg font-bold text-slate-900">Global Training Loss</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-2">
-                            <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={data?.evaluations || []}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                                    <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={(t) => `v${t}`} />
-                                    <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
-                                    <Tooltip
-                                        contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                                        itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-                                        formatter={(value) => [value !== undefined ? Number(value).toFixed(4) : '', 'Loss']}
-                                    />
-                                    <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3} dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
-                                </LineChart>
-                            </ResponsiveContainer>
+                        <div className="h-64 w-full rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                            {(data?.evaluations.length ?? 0) > 0 ? (
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={data!.evaluations}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                                        <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={t => `v${t}`} />
+                                        <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
+                                        <Tooltip
+                                            contentStyle={{ backgroundColor: "#fff", borderColor: "#e2e8f0", borderRadius: "8px" }}
+                                            formatter={(v: number) => [v.toFixed(4), "Loss"]}
+                                        />
+                                        <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3}
+                                            dot={{ fill: "#ef4444", r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            ) : (
+                                <div className="flex h-full items-center justify-center text-slate-400 text-sm">
+                                    No evaluation data yet.
+                                </div>
+                            )}
                         </div>
                     </CardContent>
                 </Card>
             </div>
 
-            {/* Recent Activity Table */}
+            {/* Activity Feed */}
             <Card className="bg-white border-slate-200 shadow-sm mt-4">
                 <CardHeader>
                     <CardTitle className="text-lg font-bold text-slate-900">Recent Aggregation Activity</CardTitle>
@@ -180,15 +205,12 @@ export default function OverviewPage() {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200">
-                                {activityFeed.length > 0 ? activityFeed.slice(0, 5).map((row, i) => (
+                                {activityRows.length > 0 ? activityRows.map((row, i) => (
                                     <tr key={i} className="bg-white hover:bg-slate-50 transition-colors">
                                         <td className="px-6 py-4 font-medium text-slate-900">{row.event}</td>
-                                        <td className="px-6 py-4 text-slate-500">{row.details}</td>
+                                        <td className="px-6 py-4 text-slate-500 text-xs">{row.details}</td>
                                         <td className="px-6 py-4">
-                                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium border ${row.status === 'Success' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                row.status === 'Warning' ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                                    'bg-blue-50 text-blue-700 border-blue-200'
-                                                }`}>
+                                            <span className="px-2.5 py-1 rounded-full text-xs font-medium border bg-green-50 text-green-700 border-green-200">
                                                 {row.status}
                                             </span>
                                         </td>
@@ -196,7 +218,9 @@ export default function OverviewPage() {
                                     </tr>
                                 )) : (
                                     <tr>
-                                        <td colSpan={4} className="px-6 py-8 text-center text-slate-500">No aggregation events yet. Fire up some simulated edge nodes!</td>
+                                        <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
+                                            No aggregation events yet. Fire up some simulated edge nodes on the Clients page!
+                                        </td>
                                     </tr>
                                 )}
                             </tbody>
