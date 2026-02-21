@@ -73,9 +73,9 @@ export default function OverviewPage() {
     ];
 
     // Build mixed activity timeline
-    const activityFeed = [];
+    const activityFeed: any[] = [];
     if (data?.aggregations) {
-        data.aggregations.slice().reverse().forEach((agg) => {
+        data.aggregations.slice().reverse().forEach((agg: any) => {
             activityFeed.push({
                 event: "Global Model Updated",
                 details: `Version v${agg.version_id} compiled using ${agg.method}`,
@@ -130,7 +130,7 @@ export default function OverviewPage() {
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
                                         itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-                                        formatter={(value: number) => [`${(value * 100).toFixed(2)}%`, 'Accuracy']}
+                                        formatter={(value: any) => [`${(value * 100).toFixed(2)}%`, 'Accuracy']}
                                     />
                                     <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3} dot={{ fill: "#2563eb", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
                                 </LineChart>
@@ -153,7 +153,7 @@ export default function OverviewPage() {
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
                                         itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-                                        formatter={(value: number) => [value.toFixed(4), 'Loss']}
+                                        formatter={(value: any) => [value.toFixed(4), 'Loss']}
                                     />
                                     <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3} dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
                                 </LineChart>

@@ -1,7 +1,43 @@
+"use client";
+
+import { useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabaseClient';
 
 export default function LoginPage() {
+    const router = useRouter();
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
+
+    const handleLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        setLoading(true);
+
+        try {
+            const { data, error } = await supabase.auth.signInWithPassword({
+                email,
+                password,
+            });
+
+            if (error) {
+                setError(error.message);
+                return;
+            }
+
+            if (data?.session) {
+                router.push('/dashboard');
+            }
+        } catch (err: any) {
+            setError(err.message || 'An unexpected error occurred.');
+        } finally {
+            setLoading(false);
+        }
+    };
     return (
         <div className="min-h-screen w-full flex flex-col md:flex-row bg-[#F6F9F8] font-sans">
 
@@ -39,13 +75,22 @@ export default function LoginPage() {
 
                     <h1 className="text-[32px] font-bold text-[#53a292] mb-10 tracking-tight">Log In</h1>
 
-                    <form className="flex flex-col gap-[18px]">
+                    <form className="flex flex-col gap-[18px]" onSubmit={handleLogin}>
+
+                        {error && (
+                            <div className="bg-red-50 text-red-600 text-sm p-3 rounded-md border border-red-200">
+                                {error}
+                            </div>
+                        )}
 
                         {/* Inputs */}
                         <div>
                             <input
                                 type="email"
                                 placeholder="Email address..."
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -54,6 +99,9 @@ export default function LoginPage() {
                             <input
                                 type="password"
                                 placeholder="Password..."
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -77,10 +125,11 @@ export default function LoginPage() {
 
                         {/* Submit Button */}
                         <button
-                            type="button"
-                            className="w-full bg-[#2C343D] hover:bg-[#1a2026] text-white font-bold py-3.5 rounded-md shadow-sm transition-colors mt-2"
+                            type="submit"
+                            disabled={loading}
+                            className="w-full bg-[#2C343D] hover:bg-[#1a2026] text-white font-bold py-3.5 rounded-md shadow-sm transition-colors mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
                         >
-                            Log In
+                            {loading ? "Logging in..." : "Log In"}
                         </button>
 
                     </form>

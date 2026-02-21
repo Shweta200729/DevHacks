@@ -1,7 +1,57 @@
+"use client";
+
+import { useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabaseClient';
 
 export default function SignupPage() {
+    const router = useRouter();
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [success, setSuccess] = useState<string | null>(null);
+    const [username, setUsername] = useState("");
+    const [email, setEmail] = useState("");
+    const [phone, setPhone] = useState("");
+    const [password, setPassword] = useState("");
+    const [confirmPassword, setConfirmPassword] = useState("");
+
+    const handleSignup = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        setSuccess(null);
+
+        if (password !== confirmPassword) {
+            setError("Passwords do not match.");
+            return;
+        }
+
+        setLoading(true);
+
+        try {
+            const { data, error } = await supabase.auth.signUp({
+                email,
+                password
+            });
+
+            if (error) {
+                setError(error.message);
+                return;
+            }
+
+            if (data?.user) {
+                setSuccess("Signup successful! Redirecting to login...");
+                setTimeout(() => {
+                    router.push('/login');
+                }, 2000);
+            }
+        } catch (err: any) {
+            setError(err.message || 'An unexpected error occurred.');
+        } finally {
+            setLoading(false);
+        }
+    };
     return (
         <div className="min-h-screen w-full flex flex-col md:flex-row-reverse bg-[#F6F9F8] font-sans">
 
@@ -39,13 +89,27 @@ export default function SignupPage() {
 
                     <h1 className="text-[32px] font-bold text-[#53a292] mb-10 tracking-tight">Sign Up</h1>
 
-                    <form className="flex flex-col gap-[18px]">
+                    <form className="flex flex-col gap-[18px]" onSubmit={handleSignup}>
+
+                        {error && (
+                            <div className="bg-red-50 text-red-600 text-sm p-3 rounded-md border border-red-200">
+                                {error}
+                            </div>
+                        )}
+                        {success && (
+                            <div className="bg-green-50 text-green-600 text-sm p-3 rounded-md border border-green-200">
+                                {success}
+                            </div>
+                        )}
 
                         {/* Inputs */}
                         <div>
                             <input
                                 type="text"
                                 placeholder="User name..."
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -54,6 +118,9 @@ export default function SignupPage() {
                             <input
                                 type="email"
                                 placeholder="Email address..."
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -62,6 +129,9 @@ export default function SignupPage() {
                             <input
                                 type="tel"
                                 placeholder="Phone number..."
+                                value={phone}
+                                onChange={(e) => setPhone(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -70,6 +140,9 @@ export default function SignupPage() {
                             <input
                                 type="password"
                                 placeholder="Password..."
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -78,6 +151,9 @@ export default function SignupPage() {
                             <input
                                 type="password"
                                 placeholder="Confirm password..."
+                                value={confirmPassword}
+                                onChange={(e) => setConfirmPassword(e.target.value)}
+                                required
                                 className="w-full border border-gray-200 rounded-md px-4 py-[14px] text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#53a292] focus:border-[#53a292] transition-colors bg-white shadow-sm"
                             />
                         </div>
@@ -101,10 +177,11 @@ export default function SignupPage() {
 
                         {/* Submit Button */}
                         <button
-                            type="button"
-                            className="w-full bg-[#2C343D] hover:bg-[#1a2026] text-white font-bold py-3.5 rounded-md shadow-sm transition-colors mt-2"
+                            type="submit"
+                            disabled={loading}
+                            className="w-full bg-[#2C343D] hover:bg-[#1a2026] text-white font-bold py-3.5 rounded-md shadow-sm transition-colors mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
                         >
-                            Sign Up
+                            {loading ? "Creating Account..." : "Sign Up"}
                         </button>
 
                     </form>
