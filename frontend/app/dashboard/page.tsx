@@ -27,11 +27,7 @@ export default function OverviewPage() {
 
     const fetchMetrics = async () => {
         try {
-<<<<<<< HEAD
             const res = await fetch("http://localhost:8000/metrics");
-=======
-            const res = await fetch("http://localhost:8000/fl/metrics");
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
             if (res.ok) {
                 const json = await res.json();
                 json.evaluations = json.evaluations.reverse();
@@ -77,11 +73,7 @@ export default function OverviewPage() {
     ];
 
     // Build mixed activity timeline
-<<<<<<< HEAD
     const activityFeed = [];
-=======
-    const activityFeed: { event: string; details: string; status: string; time: string }[] = [];
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
     if (data?.aggregations) {
         data.aggregations.slice().reverse().forEach((agg) => {
             activityFeed.push({
@@ -138,11 +130,7 @@ export default function OverviewPage() {
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
                                         itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-<<<<<<< HEAD
                                         formatter={(value: number) => [`${(value * 100).toFixed(2)}%`, 'Accuracy']}
-=======
-                                        formatter={(value) => [value !== undefined ? `${(Number(value) * 100).toFixed(2)}%` : '', 'Accuracy']}
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                                     />
                                     <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3} dot={{ fill: "#2563eb", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
                                 </LineChart>
@@ -165,11 +153,7 @@ export default function OverviewPage() {
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
                                         itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
-<<<<<<< HEAD
                                         formatter={(value: number) => [value.toFixed(4), 'Loss']}
-=======
-                                        formatter={(value) => [value !== undefined ? Number(value).toFixed(4) : '', 'Loss']}
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                                     />
                                     <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3} dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
                                 </LineChart>

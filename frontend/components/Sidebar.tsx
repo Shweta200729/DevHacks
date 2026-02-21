@@ -8,12 +8,7 @@ import {
     Users,
     Network,
     LineChart,
-<<<<<<< HEAD
     TerminalSquare
-=======
-    TerminalSquare,
-    Settings
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
 } from "lucide-react";
 
 export function Sidebar() {
@@ -25,10 +20,6 @@ export function Sidebar() {
         { name: "Models", href: "/dashboard/models", icon: Network },
         { name: "Evaluation", href: "/dashboard/evaluation", icon: LineChart },
         { name: "Logs", href: "/dashboard/logs", icon: TerminalSquare },
-<<<<<<< HEAD
-=======
-        { name: "Settings", href: "/dashboard/settings", icon: Settings },
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
     ];
 
     const [escrowBalance, setEscrowBalance] = useState<number>(0);
@@ -36,11 +27,7 @@ export function Sidebar() {
     useEffect(() => {
         const fetchTokens = async () => {
             try {
-<<<<<<< HEAD
                 const res = await fetch("http://localhost:8000/clients");
-=======
-                const res = await fetch("http://localhost:8000/fl/clients");
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                 if (res.ok) {
                     const json = await res.json();
                     let total = 50000; // Starting protocol escrow pool
@@ -60,11 +47,7 @@ export function Sidebar() {
     }, []);
 
     return (
-<<<<<<< HEAD
         <div className="w-[240px] flex-shrink-0 bg-white border-r border-slate-200 min-h-screen flex flex-col pt-6 z-20 shadow-sm relative">
-=======
-        <div className="w-[240px] shrink-0 bg-white border-r border-slate-200 min-h-screen flex flex-col pt-6 z-20 shadow-sm relative">
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
             <div className="px-6 mb-8 flex items-center gap-2">
                 <div className="bg-blue-100 p-1.5 rounded-lg border border-blue-200">
                     <Network className="w-5 h-5 text-blue-600" />

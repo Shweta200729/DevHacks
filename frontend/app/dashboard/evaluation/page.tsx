@@ -15,11 +15,7 @@ export default function EvaluationPage() {
     useEffect(() => {
         const fetchMetrics = async () => {
             try {
-<<<<<<< HEAD
                 const res = await fetch("http://localhost:8000/metrics");
-=======
-                const res = await fetch("http://localhost:8000/fl/metrics");
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                 if (res.ok) {
                     const json = await res.json();
                     setEvaluations(json.evaluations.reverse());
@@ -66,11 +62,7 @@ export default function EvaluationPage() {
                                     <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={(t) => `${(t * 100).toFixed(0)}%`} />
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
-<<<<<<< HEAD
                                         formatter={(val: number | string | Array<number | string>) => [`${(Number(val) * 100).toFixed(2)}%`, '']}
-=======
-                                        formatter={(val) => [val !== undefined ? `${(Number(val) * 100).toFixed(2)}%` : '', '']}
->>>>>>> 9ea4d82af49c4f14145d1d31c2f41059b14ea187
                                     />
                                     <Legend wrapperStyle={{ paddingTop: '20px' }} />
                                     <Line
