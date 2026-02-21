@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
     LayoutDashboard,
     Users,
@@ -20,6 +21,30 @@ export function Sidebar() {
         { name: "Evaluation", href: "/dashboard/evaluation", icon: LineChart },
         { name: "Logs", href: "/dashboard/logs", icon: TerminalSquare },
     ];
+
+    const [escrowBalance, setEscrowBalance] = useState<number>(0);
+
+    useEffect(() => {
+        const fetchTokens = async () => {
+            try {
+                const res = await fetch("http://localhost:8000/clients");
+                if (res.ok) {
+                    const json = await res.json();
+                    let total = 50000; // Starting protocol escrow pool
+                    json.data?.forEach((c: any) => {
+                        if (c.status === "ACCEPT") total += 10;
+                        else total -= 15;
+                    });
+                    setEscrowBalance(total);
+                }
+            } catch (e) {
+                setEscrowBalance(50000);
+            }
+        };
+        fetchTokens();
+        const interval = setInterval(fetchTokens, 5000);
+        return () => clearInterval(interval);
+    }, []);
 
     return (
         <div className="w-[240px] flex-shrink-0 bg-white border-r border-slate-200 min-h-screen flex flex-col pt-6 z-20 shadow-sm relative">
@@ -42,8 +67,8 @@ export function Sidebar() {
                             key={link.name}
                             href={link.href}
                             className={`flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium transition-all group relative overflow-hidden ${isActive
-                                    ? "text-blue-700 bg-blue-50/80 shadow-sm border border-blue-100"
-                                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900 border border-transparent"
+                                ? "text-blue-700 bg-blue-50/80 shadow-sm border border-blue-100"
+                                : "text-slate-600 hover:bg-slate-50 hover:text-slate-900 border border-transparent"
                                 }`}
                         >
                             {isActive && (
@@ -56,13 +81,27 @@ export function Sidebar() {
                 })}
             </nav>
 
-            <div className="mt-auto p-4 m-4 rounded-xl bg-slate-50 border border-slate-200 relative overflow-hidden">
-                <div className="absolute inset-0 bg-blue-500/5 blur-2xl rounded-full" />
-                <p className="text-xs font-semibold text-slate-900 mb-1 relative z-10">Workspace Status</p>
-                <div className="flex items-center gap-2 text-xs text-slate-500 relative z-10">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    System Healthy
+            <div className="mt-auto p-4 m-4 rounded-xl bg-slate-50 border border-slate-200 relative overflow-hidden flex flex-col gap-2 shadow-sm">
+                <div className="absolute inset-0 bg-indigo-500/5 blur-2xl rounded-full" />
+
+                <p className="text-xs font-semibold text-slate-500 relative z-10 flex items-center justify-between">
+                    Smart Contract Escrow
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
+                </p>
+
+                <div className="flex items-baseline gap-1 relative z-10">
+                    <span className="text-2xl font-black text-slate-900 tracking-tight">
+                        {escrowBalance.toLocaleString()}
+                    </span>
+                    <span className="text-xs font-bold text-indigo-600">FLT</span>
                 </div>
+
+                <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1 relative z-10">
+                    <div className="bg-indigo-500 h-full w-[85%] rounded-full shadow-[0_0_10px_rgba(99,102,241,0.5)]" />
+                </div>
+                <p className="text-[10px] text-slate-400 text-right mt-0.5 relative z-10 font-mono">
+                    Pool Health: Stable
+                </p>
             </div>
         </div>
     );

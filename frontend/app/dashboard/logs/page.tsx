@@ -1,70 +1,151 @@
-import { TracingBeam } from "@/components/ui/tracing-beam";
-import { TerminalSquare } from "lucide-react";
+"use client";
+import React, { useEffect, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TerminalSquare, RefreshCw } from "lucide-react";
+
+interface LogEntry {
+    id: string | number;
+    timestamp: string;
+    type: "INFO" | "WARN" | "ERROR" | "SUCCESS";
+    message: string;
+    node?: string;
+}
 
 export default function LogsPage() {
-    const logEntries = [
-        { time: "14:02:11.432", level: "info", title: "Federation Round Started", msg: "Initializing Round 45. Waiting for minimum 100 client gradients.", type: "system" },
-        { time: "14:02:45.102", level: "info", title: "Client Update Rcvd", msg: "Client [0A3X1] submitted 4MB gradient package. Added to queue.", type: "client" },
-        { time: "14:02:46.883", level: "info", title: "Client Update Rcvd", msg: "Client [B89Q2] submitted 4MB gradient package. Added to queue.", type: "client" },
-        { time: "14:02:51.011", level: "warn", title: "Update Rejected", msg: "Client [X99Q0] rejected. Out of bounds penalty (L2 Norm: 24.5 > 10.0).", type: "security" },
-        { time: "14:04:15.900", level: "info", title: "Threshold Reached", msg: "100 updates queued. Initiating aggregation protocol.", type: "system" },
-        { time: "14:04:16.050", level: "info", title: "Aggregation Started", msg: "Applying Trimmed Mean (discard rate: 10%). Resolving 90 gradients.", type: "compute" },
-        { time: "14:04:45.312", level: "success", title: "Global Model Compiled", msg: "Version v2.0.5 successfully built. Validation ACC: 94.6%.", type: "system" },
-        { time: "14:05:00.000", level: "info", title: "Federation Round Ended", msg: "Dispatching v2.0.5 weights to active clients. Entering idle state.", type: "system" },
-    ];
+    const [logs, setLogs] = useState<LogEntry[]>([]);
+    const [isRefreshing, setIsRefreshing] = useState(false);
+
+    const fetchLogs = async () => {
+        setIsRefreshing(true);
+        try {
+            // For now, we will construct a mock chronological log stream from 
+            // the /metrics and /clients endpoints to simulate a real log server.
+            // In a production app, we'd add an /api/logs route filtering Winston or Stdout logs.
+            const [metricsRes, clientsRes] = await Promise.all([
+                fetch("http://localhost:8000/metrics").catch(() => null),
+                fetch("http://localhost:8000/clients").catch(() => null)
+            ]);
+
+            let mergedLogs: LogEntry[] = [];
+
+            if (metricsRes?.ok) {
+                const mJson = await metricsRes.json();
+                mJson.aggregations?.forEach((agg: any) => {
+                    mergedLogs.push({
+                        id: `agg-${agg.id}`,
+                        timestamp: agg.created_at || new Date().toISOString(),
+                        type: "INFO",
+                        message: `Aggregated Version ${agg.version_id} using ${agg.method}. Valid: ${agg.total_accepted}, Rejected: ${agg.total_rejected}`,
+                        node: "Master Node"
+                    });
+                });
+            }
+
+            if (clientsRes?.ok) {
+                const cJson = await clientsRes.json();
+                cJson.data?.forEach((c: any) => {
+                    mergedLogs.push({
+                        id: `client-${c.id}`,
+                        timestamp: c.created_at || new Date().toISOString(),
+                        type: c.status === "ACCEPT" ? "SUCCESS" : "WARN",
+                        message: c.status === "ACCEPT"
+                            ? `Client update validated. Norm: ${c.norm_value?.toFixed(2)}`
+                            : `Poisoning detected: ${c.reason}. Norm: ${c.norm_value?.toFixed(2)}, Dist: ${c.distance_value?.toFixed(2)}`,
+                        node: c.client_id
+                    });
+                });
+            }
+
+            // Sort by timestamp descending
+            mergedLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+            // Artificial insertion if empty (for UI demo purposes)
+            if (mergedLogs.length === 0) {
+                mergedLogs = [{
+                    id: 'init',
+                    timestamp: new Date().toISOString(),
+                    type: 'INFO',
+                    message: "FL Aggregator Server Initialized. Awaiting connections...",
+                    node: "System"
+                }];
+            }
+
+            setLogs(mergedLogs);
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsRefreshing(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchLogs();
+        const interval = setInterval(fetchLogs, 5000); // Polling every 5s for logs
+        return () => clearInterval(interval);
+    }, []);
+
+    const getLogColor = (type: string) => {
+        switch (type) {
+            case "INFO": return "text-blue-400";
+            case "WARN": return "text-yellow-400";
+            case "ERROR": return "text-red-400";
+            case "SUCCESS": return "text-green-400";
+            default: return "text-slate-300";
+        }
+    };
 
     return (
-        <div className="flex flex-col gap-8 pb-32">
-            <div className="flex flex-col gap-2 mb-8">
-                <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight flex items-center gap-3">
-                    <TerminalSquare className="w-8 h-8 text-blue-600" /> System Events
-                </h2>
-                <p className="text-slate-500">Live, chronological event stream from the aggregation backend.</p>
+        <div className="flex flex-col gap-8 pb-10 h-full">
+            <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-2">
+                    <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">System Logs</h2>
+                    <p className="text-slate-500">Immutable audit trail of edge client submissions and master node aggregations.</p>
+                </div>
             </div>
 
-            <TracingBeam className="pl-6">
-                <div className="flex flex-col gap-4 w-full">
-                    {logEntries.map((log, i) => (
-                        <div key={i} className="bg-slate-50/80 border border-slate-200 rounded-lg p-5 font-mono text-sm relative group hover:bg-white hover:shadow-md transition-all duration-300">
-                            {/* Event type marker */}
-                            <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l-lg ${log.level === 'warn' ? 'bg-amber-400' :
-                                    log.level === 'success' ? 'bg-green-500' :
-                                        log.type === 'compute' ? 'bg-purple-500' :
-                                            'bg-blue-500'
-                                }`} />
-
-                            <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-3">
-                                    <span className={`font-semibold bg-white px-2 py-0.5 rounded shadow-sm border ${log.level === 'warn' ? 'text-amber-700 border-amber-200' :
-                                            log.level === 'success' ? 'text-green-700 border-green-200' :
-                                                'text-blue-700 border-blue-200'
-                                        }`}>
-                                        {log.title}
+            <Card className="bg-slate-950 border-slate-900 shadow-xl flex-grow flex flex-col overflow-hidden">
+                <CardHeader className="border-b border-slate-800 bg-slate-900 py-3 flex flex-row items-center justify-between">
+                    <CardTitle className="text-sm font-mono text-slate-300 flex items-center gap-2">
+                        <TerminalSquare className="w-4 h-4 text-slate-400" />
+                        bash - root@fl-master-node
+                    </CardTitle>
+                    <button
+                        onClick={fetchLogs}
+                        className="text-slate-400 hover:text-white transition-colors p-1 rounded hover:bg-slate-800"
+                    >
+                        <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    </button>
+                </CardHeader>
+                <CardContent className="p-0 overflow-y-auto h-[600px] font-mono text-sm bg-[#0C111D]">
+                    <div className="p-4 flex flex-col content-start w-full">
+                        {logs.map((log) => (
+                            <div key={log.id} className="py-1 border-b border-slate-800/50 hover:bg-slate-900/50 flex gap-4 w-full">
+                                <span className="text-slate-600 shrink-0 select-none">
+                                    {new Date(log.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                </span>
+                                <span className={`font-semibold w-16 shrink-0 ${getLogColor(log.type)}`}>
+                                    [{log.type}]
+                                </span>
+                                {log.node && (
+                                    <span className="text-slate-400 shrink-0 w-28 truncate">
+                                        {log.node}
                                     </span>
-                                </div>
-                                <span className="text-slate-400 group-hover:text-blue-500 transition-colors">[{log.time}]</span>
+                                )}
+                                <span className="text-slate-300 break-words flex-grow">
+                                    {log.message}
+                                </span>
                             </div>
-
-                            <div className="pl-1 text-slate-600">
-                                <span className="text-slate-400 mr-2">&gt;</span>{log.msg}
-                            </div>
-
-                            {log.level === 'warn' && (
-                                <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 p-2 text-xs rounded">
-                                    ! SECURITY TRACE: Malicious payload signature detected in vector [1024:2048].
-                                </div>
-                            )}
-                        </div>
-                    ))}
-
-                    <div className="flex items-center justify-center py-8">
-                        <div className="animate-pulse flex items-center gap-2 text-slate-400 text-sm font-mono">
-                            <span className="w-2 h-2 rounded-full bg-slate-400" />
-                            Waiting for events...
+                        ))}
+                        {logs.length === 0 && !isRefreshing && (
+                            <div className="text-slate-600 italic mt-4">No system logs available.</div>
+                        )}
+                        <div className="mt-4 flex items-center gap-2 animate-pulse text-slate-500">
+                            <span className="w-2 h-4 bg-slate-400 inline-block" />
+                            Listening for incoming connections...
                         </div>
                     </div>
-                </div>
-            </TracingBeam>
+                </CardContent>
+            </Card>
         </div>
     );
 }

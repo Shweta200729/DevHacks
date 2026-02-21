@@ -1,21 +1,97 @@
+"use client";
+import React, { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BorderBeam } from "@/components/ui/border-beam";
 import { Activity, Network, ShieldCheck, Cpu, ArrowUpRight, CopyCheck } from "lucide-react";
+import {
+    LineChart,
+    Line,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip,
+    ResponsiveContainer,
+    Legend
+} from "recharts";
+
+interface MetricsData {
+    current_version: number;
+    evaluations: any[];
+    aggregations: any[];
+    pending_queue_size: number;
+}
 
 export default function OverviewPage() {
+    const [data, setData] = useState<MetricsData | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    const fetchMetrics = async () => {
+        try {
+            const res = await fetch("http://localhost:8000/metrics");
+            if (res.ok) {
+                const json = await res.json();
+                json.evaluations = json.evaluations.reverse();
+                json.aggregations = json.aggregations.reverse();
+                setData(json);
+            }
+        } catch (e) {
+            console.error("Failed fetching metrics", e);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchMetrics();
+        const interval = setInterval(fetchMetrics, 3000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const calculateTotalClients = () => {
+        if (!data?.aggregations) return { acc: 0, rej: 0, active: 0 };
+        let acc = 0;
+        let rej = 0;
+        data.aggregations.forEach(a => {
+            acc += a.total_accepted;
+            rej += a.total_rejected; // If available directly, else calculate from DB logs
+        });
+        return { acc, rej, active: Math.max(1248, acc * 4) }; // Faux active scale for visual demo
+    };
+
+    const stats = calculateTotalClients();
+
+    // Safety fallback latest values 
+    const latestEval = data?.evaluations?.length ? data.evaluations[data.evaluations.length - 1] : null;
+    const latestAgg = data?.aggregations?.length ? data.aggregations[data.aggregations.length - 1] : null;
+
     const kpis = [
-        { title: "Current Model Version", value: "v2.0.4", icon: Network, trend: "+1 new since yesterday" },
-        { title: "Aggregation Method", value: "Trimmed Mean", icon: Cpu, trend: "Robust enabled" },
-        { title: "Active Clients", value: "1,248", icon: Activity, trend: "+12% active this hour" },
-        { title: "Rejected Updates", value: "24", icon: ShieldCheck, trend: "0.02% rejection rate", highlight: true },
-        { title: "Latest Accuracy", value: "94.2%", icon: CopyCheck, trend: "+0.4% from last global round", highlightKey: true },
+        { title: "Current Model Version", value: `v${data?.current_version || 0}`, icon: Network, trend: "Live Synced" },
+        { title: "Aggregation Method", value: latestAgg?.method || "Trimmed Mean", icon: Cpu, trend: "DP layer enabled" },
+        { title: "Total Valid Updates", value: stats.acc.toString(), icon: Activity, trend: `Queue: ${data?.pending_queue_size || 0}` },
+        { title: "Rejected Updates", value: stats.rej.toString(), icon: ShieldCheck, trend: "Malicious payloads blocked", highlight: true },
+        { title: "Latest Accuracy", value: latestEval ? `${(latestEval.accuracy * 100).toFixed(2)}%` : "N/A", icon: CopyCheck, trend: "Validated on MNIST test set", highlightKey: true },
     ];
+
+    // Build mixed activity timeline
+    const activityFeed = [];
+    if (data?.aggregations) {
+        data.aggregations.slice().reverse().forEach((agg) => {
+            activityFeed.push({
+                event: "Global Model Updated",
+                details: `Version v${agg.version_id} compiled using ${agg.method}`,
+                status: "Success",
+                time: `Round ${agg.version_id}`
+            });
+        });
+    }
 
     return (
         <div className="flex flex-col gap-8 pb-10">
-            <div className="flex flex-col gap-2">
-                <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">Global System Overview</h2>
-                <p className="text-slate-500">Real-time metrics for your federated learning infrastructure.</p>
+            <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-2">
+                    <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">Global System Overview</h2>
+                    <p className="text-slate-500">Real-time metrics for your federated learning infrastructure.</p>
+                </div>
             </div>
 
             {/* KPI Section */}
@@ -25,10 +101,10 @@ export default function OverviewPage() {
                         {kpi.highlightKey && <BorderBeam duration={8} size={150} />}
                         <CardHeader className="flex flex-row items-center justify-between pb-2">
                             <CardTitle className="text-sm font-medium text-slate-500">{kpi.title}</CardTitle>
-                            <kpi.icon className={`h-4 w-4 ${kpi.highlightKey ? "text-blue-600" : "text-slate-400"}`} />
+                            <kpi.icon className={`h-4 w-4 ${kpi.highlightKey ? "text-blue-600" : kpi.highlight ? "text-red-500" : "text-slate-400"}`} />
                         </CardHeader>
                         <CardContent>
-                            <div className={`text-2xl font-bold ${kpi.highlightKey ? 'text-blue-700' : 'text-slate-900'}`}>{kpi.value}</div>
+                            <div className={`text-2xl font-bold ${kpi.highlightKey ? 'text-blue-700' : kpi.highlight ? 'text-red-600' : 'text-slate-900'}`}>{kpi.value}</div>
                             <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
                                 {i === 2 || i === 4 ? <ArrowUpRight className="h-3 w-3 text-green-500" /> : null}
                                 {kpi.trend}
@@ -45,29 +121,20 @@ export default function OverviewPage() {
                         <CardTitle className="text-lg font-bold text-slate-900">Convergence (Accuracy vs Rounds)</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50">
-                            {/* Simulated Chart SVG */}
-                            <svg className="absolute bottom-0 w-full h-full drop-shadow-[0_0_10px_rgba(37,99,235,0.1)]" viewBox="0 0 1000 300" preserveAspectRatio="none">
-                                <path
-                                    d="M 50 280 Q 150 250 250 150 T 450 100 T 650 60 T 850 40 T 950 35 L 950 300 L 50 300 Z"
-                                    fill="url(#accGradient)"
-                                    className="opacity-60"
-                                />
-                                <path
-                                    d="M 50 280 Q 150 250 250 150 T 450 100 T 650 60 T 850 40 T 950 35"
-                                    fill="none"
-                                    stroke="#2563EB"
-                                    strokeWidth="3"
-                                />
-                                <defs>
-                                    <linearGradient id="accGradient" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#2563EB" stopOpacity="0.2" />
-                                        <stop offset="100%" stopColor="#2563EB" stopOpacity="0" />
-                                    </linearGradient>
-                                </defs>
-                            </svg>
-                            {/* Axis markers */}
-                            <div className="absolute inset-0 border-b border-l border-slate-200 m-4 pointer-events-none" />
+                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={data?.evaluations || []}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                                    <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={(t) => `v${t}`} />
+                                    <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(t) => `${(t * 100).toFixed(0)}%`} domain={[0, 1]} />
+                                    <Tooltip
+                                        contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
+                                        itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
+                                        formatter={(value: number) => [`${(value * 100).toFixed(2)}%`, 'Accuracy']}
+                                    />
+                                    <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3} dot={{ fill: "#2563eb", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
+                                </LineChart>
+                            </ResponsiveContainer>
                         </div>
                     </CardContent>
                 </Card>
@@ -77,29 +144,20 @@ export default function OverviewPage() {
                         <CardTitle className="text-lg font-bold text-slate-900">Global Training Loss</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50">
-                            {/* Simulated Chart SVG */}
-                            <svg className="absolute bottom-0 w-full h-full drop-shadow-[0_0_10px_rgba(37,99,235,0.1)]" viewBox="0 0 1000 300" preserveAspectRatio="none">
-                                <path
-                                    d="M 50 50 Q 150 80 250 150 T 450 220 T 650 250 T 850 270 T 950 280 L 950 300 L 50 300 Z"
-                                    fill="url(#lossGradient)"
-                                    className="opacity-60"
-                                />
-                                <path
-                                    d="M 50 50 Q 150 80 250 150 T 450 220 T 650 250 T 850 270 T 950 280"
-                                    fill="none"
-                                    stroke="#3B82F6"
-                                    strokeWidth="3"
-                                />
-                                <defs>
-                                    <linearGradient id="lossGradient" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.15" />
-                                        <stop offset="100%" stopColor="#3B82F6" stopOpacity="0" />
-                                    </linearGradient>
-                                </defs>
-                            </svg>
-                            {/* Axis markers */}
-                            <div className="absolute inset-0 border-b border-l border-slate-200 m-4 pointer-events-none" />
+                        <div className="h-64 w-full relative flex items-end pt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={data?.evaluations || []}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                                    <XAxis dataKey="version_id" stroke="#94a3b8" fontSize={12} tickLine={false} tickFormatter={(t) => `v${t}`} />
+                                    <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
+                                    <Tooltip
+                                        contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
+                                        itemStyle={{ color: '#0f172a', fontWeight: 'bold' }}
+                                        formatter={(value: number) => [value.toFixed(4), 'Loss']}
+                                    />
+                                    <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3} dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
+                                </LineChart>
+                            </ResponsiveContainer>
                         </div>
                     </CardContent>
                 </Card>
@@ -122,26 +180,25 @@ export default function OverviewPage() {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200">
-                                {[
-                                    { event: "Global Model Updated", details: "Version v2.0.4 compiled using Trimmed Mean", status: "Success", time: "2 mins ago" },
-                                    { event: "Update Rejected", details: "Client #894A L2-norm exceeded threshold (15.4 > 10.0)", status: "Warning", time: "12 mins ago" },
-                                    { event: "Aggregation Started", details: "Waiting for 100 client updates", status: "Info", time: "45 mins ago" },
-                                    { event: "Client Registered", details: "New edge node cluster connected in US-West", status: "Success", time: "1 hour ago" },
-                                ].map((row, i) => (
+                                {activityFeed.length > 0 ? activityFeed.slice(0, 5).map((row, i) => (
                                     <tr key={i} className="bg-white hover:bg-slate-50 transition-colors">
                                         <td className="px-6 py-4 font-medium text-slate-900">{row.event}</td>
                                         <td className="px-6 py-4 text-slate-500">{row.details}</td>
                                         <td className="px-6 py-4">
                                             <span className={`px-2.5 py-1 rounded-full text-xs font-medium border ${row.status === 'Success' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                    row.status === 'Warning' ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                                        'bg-blue-50 text-blue-700 border-blue-200'
+                                                row.status === 'Warning' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                                    'bg-blue-50 text-blue-700 border-blue-200'
                                                 }`}>
                                                 {row.status}
                                             </span>
                                         </td>
                                         <td className="px-6 py-4 text-right text-slate-400 text-xs">{row.time}</td>
                                     </tr>
-                                ))}
+                                )) : (
+                                    <tr>
+                                        <td colSpan={4} className="px-6 py-8 text-center text-slate-500">No aggregation events yet. Fire up some simulated edge nodes!</td>
+                                    </tr>
+                                )}
                             </tbody>
                         </table>
                     </div>

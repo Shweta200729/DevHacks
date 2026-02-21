@@ -99,8 +99,9 @@ async def startup_event():
             logger.info("Initialized Brand New Global Model (Version 1).")
 
     import ssl
+
     ssl._create_default_https_context = ssl._create_unverified_context
-    
+
     # Load MNIST Validation Set
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
@@ -206,6 +207,27 @@ async def get_metrics():
         "aggregations": aggs.data,
         "pending_queue_size": len(pending_updates),
     }
+
+
+@app.get("/clients")
+async def get_clients():
+    """Endpoint for Dashboard Edge Clients Page."""
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
+
+    try:
+        # Get the latest 50 client update attempts
+        client_logs = (
+            storage.supabase.table("client_updates")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        return {"data": client_logs.data}
+    except Exception as e:
+        logger.error(f"Failed to fetch clients: {e}")
+        return {"data": []}
 
 
 @app.post("/update")
