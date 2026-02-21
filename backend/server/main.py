@@ -262,6 +262,8 @@ async def _run_aggregation_async(batch: List[Tuple]):
 @app.get("/model")
 async def get_global_model():
     """Clients download current global model weights (.pt binary)."""
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
     async with model_lock:
         weights = global_model.get_weights()
     buf = io.BytesIO()
@@ -291,6 +293,9 @@ async def receive_update(
     """
     global pending_updates
 
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+
     try:
         raw = await file.read()
         client_weights: Dict[str, torch.Tensor] = torch.load(
@@ -301,7 +306,7 @@ async def receive_update(
 
     async with model_lock:
         global_weights = global_model.get_weights()
-        curr_vid = current_version_id
+        curr_vid = current_version_id or ""
 
     status, reason, norm_val, dist_val = detect_update(
         client_weights, global_weights, cfg=runtime_cfg
@@ -434,6 +439,8 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
     Uses the same global model + FLSettings as real clients.
     Malicious clients inject large Gaussian noise before submission.
     """
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
     def _worker(name: str, malicious: bool, mult: float, vid):
         import asyncio as _as
         from clients.local_training import get_updated_weights
@@ -553,25 +560,130 @@ async def set_config(update: ConfigUpdate):
 
 def _train_client_background(client_id: str, file_path: str):
     """
-    Background task: trains on the uploaded CSV using the universal csv_trainer.
-    Uses FLSettings for epochs — no magic numbers.
+    Background task triggered by CSV upload from the frontend.
+
+    Full pipeline:
+      1. Parse CSV → detect input_dim + num_classes automatically.
+      2. If no global model exists yet, build one from the detected shape.
+      3. Train locally on the uploaded data using real PyTorch.
+      4. Submit the trained weights into the aggregation pipeline.
+      5. Aggregate → update global model → evaluate → store metrics.
+    
+    This means: uploading a CSV from the dashboard is enough to
+    populate all graphs with real accuracy/loss data. No DATASET_NAME needed.
     """
     import asyncio as _as
+
     logger.info(f"[BG Train] Starting for {client_id} on {file_path}")
     try:
-        from clients.csv_trainer import train_on_csv
-        gw = _as.run(_async_get_weights())
-        saved = train_on_csv(
-            client_id     = client_id,
-            csv_path      = file_path,
-            global_weights= gw,
-            epochs        = cfg.BG_TRAIN_EPOCHS,
-            device        = cfg.DEVICE,
+        from clients.csv_trainer import (
+            _sniff_csv, _build_label_map, UniversalCSVDataset, train_on_csv,
         )
-        if saved:
-            logger.info(f"[BG Train] ✅ {client_id} → {saved}")
-        else:
+
+        # ── Step 1: Detect CSV shape ─────────────────────────────────────────
+        has_header, num_features = _sniff_csv(file_path)
+        label_map   = _build_label_map(file_path, has_header)
+        num_classes = len(label_map)
+        logger.info(
+            f"[BG Train] CSV detected: features={num_features}, "
+            f"classes={num_classes}"
+        )
+
+        # ── Step 2: Auto-build global model if none exists ───────────────────
+        global global_model, val_loader
+        if global_model is None:
+            import math
+            side = int(math.isqrt(num_features))
+            is_image = (side * side == num_features and side >= 8)
+            input_shape = (1, side, side) if is_image else (num_features,)
+
+            new_model = build_model(
+                input_shape = input_shape,
+                num_classes = num_classes,
+                hidden_dims = cfg.hidden_dims(),
+            )
+            logger.info(f"[BG Train] Built global model from CSV: {new_model}")
+
+            # Build a validation loader from 20% of this CSV
+            dataset = UniversalCSVDataset(file_path, label_map, has_header)
+            n_val   = max(1, int(len(dataset) * cfg.TEST_SPLIT_RATIO))
+            n_train = len(dataset) - n_val
+            from torch.utils.data import random_split
+            _, val_subset = random_split(
+                dataset, [n_train, n_val],
+                generator=torch.Generator().manual_seed(42),
+            )
+            new_val_loader = DataLoader(
+                val_subset, batch_size=cfg.BATCH_SIZE, shuffle=False
+            )
+
+            # Atomically set the global model + val loader
+            loop = _as.new_event_loop()
+            async def _set_model():
+                async with model_lock:
+                    global global_model, val_loader
+                    global_model = new_model
+                    val_loader   = new_val_loader
+            loop.run_until_complete(_set_model())
+            loop.close()
+            logger.info("[BG Train] Global model + validation loader initialised.")
+
+            # Save initial version to DB
+            if storage:
+                loop2 = _as.new_event_loop()
+                loop2.run_until_complete(_init_fresh_model())
+                loop2.close()
+
+        # ── Step 3: Get current global weights ───────────────────────────────
+        gw = _as.run(_async_get_weights())
+
+        # ── Step 4: Train on the CSV ─────────────────────────────────────────
+        saved_path = train_on_csv(
+            client_id      = client_id,
+            csv_path       = file_path,
+            global_weights = gw,
+            epochs         = cfg.BG_TRAIN_EPOCHS,
+            device         = cfg.DEVICE,
+        )
+
+        if not saved_path:
             logger.warning(f"[BG Train] ⚠️ No weights produced for {client_id}")
+            return
+
+        # ── Step 5: Load the trained weights ─────────────────────────────────
+        checkpoint = torch.load(saved_path, weights_only=True, map_location="cpu")
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            client_weights = checkpoint["state_dict"]
+        else:
+            client_weights = checkpoint
+
+        # ── Step 6: Feed into aggregation pipeline ───────────────────────────
+        # (detect → accept/reject → aggregate → evaluate → store)
+        from server.detection import detect_update as _detect
+        global_weights = _as.run(_async_get_weights())
+
+        status, reason, norm_val, dist_val = _detect(
+            client_weights, global_weights, cfg=runtime_cfg
+        )
+
+        if storage:
+            try:
+                db_id = storage.register_client(client_id)
+                storage.log_client_update(
+                    current_version_id or "", db_id,
+                    status, norm_val, dist_val, reason,
+                )
+            except Exception:
+                pass
+
+        if status == "ACCEPT":
+            logger.info(f"[BG Train] ✅ Weights accepted, feeding into aggregation.")
+            _as.run(_enqueue_and_aggregate(client_id, client_weights))
+        else:
+            logger.warning(f"[BG Train] ⚠️ Weights rejected: {reason}")
+
+        logger.info(f"[BG Train] ✅ Complete for {client_id}")
+
     except Exception as exc:
         logger.error(f"[BG Train] ❌ {client_id}: {exc}", exc_info=True)
 
