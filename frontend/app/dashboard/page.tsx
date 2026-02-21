@@ -174,7 +174,7 @@ export default function OverviewPage() {
             </div>
 
             {/* ── Real-Time Insights Panel ─────────────────────────────────── */}
-            <Card className="bg-gradient-to-br from-slate-900 to-slate-800 border-slate-700 shadow-xl text-white">
+            <Card className="bg-linear-to-br from-slate-900 to-slate-800 border-slate-700 shadow-xl text-white">
                 <CardHeader>
                     <CardTitle className="text-base font-bold text-white flex items-center gap-2">
                         <Zap className="w-4 h-4 text-yellow-400" />
@@ -226,7 +226,7 @@ export default function OverviewPage() {
                                         tickLine={false} axisLine={false} />
                                     <Tooltip
                                         contentStyle={{ backgroundColor: "#fff", borderColor: "#e2e8f0", borderRadius: 8, boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}
-                                        formatter={(value: any, name: string) =>
+                                        formatter={(value: any, name: any) =>
                                             name === "accuracy" ? [`${value}%`, "Accuracy"] : [value, "Loss"]
                                         }
                                     />

@@ -66,7 +66,9 @@ async def signup(request: SignupRequest):
         return {"message": "User created successfully", "user": response.data}
     except Exception as e:
         print(f"Signup error: {e}")
-        raise HTTPException(status_code=500, detail=f"Database error saving new user: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Database error saving new user: {str(e)}"
+        )
 
 
 @app.post("/api/auth/login")
@@ -108,3 +110,15 @@ async def login(request: LoginRequest):
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
+
+
+# ── Mount the Federated Learning sub-app under /fl ──────────────────────────
+# All dashboard API calls use the /fl/* prefix. Without this mount,
+# every /fl/* request returns 404 from the root auth-only app.
+import sys as _sys, os as _os
+
+_sys.path.insert(0, _os.path.abspath(_os.path.dirname(__file__)))
+
+from server.main import app as fl_app  # noqa: E402
+
+app.mount("/fl", fl_app)
