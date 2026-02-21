@@ -1,18 +1,16 @@
 """
-client/local_training.py
+clients/local_training.py
 
-Implements the client-side local training pipeline for Federated Learning.
-All logic uses real PyTorch operations — no mocking, no fake gradients.
+Client-side local training pipeline for the Federated Learning system.
 
-Responsibilities:
-  - Load global weights from the server into a local model.
-  - Run a real, full training loop on local data.
-  - Return updated weights for submission to the server.
+All hyperparameters (epochs, LR, batch size, optimizer) are read from
+config.settings — no magic numbers in this file.
+No dataset-specific logic. No architecture assumptions.
+Works with any FLModel (CNN or MLP).
+
+Real PyTorch training only — no mocking, no fake gradients.
 """
 
-import os
-import sys
-import copy
 import logging
 from typing import Dict, Optional
 
@@ -21,9 +19,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-# Resolve path so we can import CNNModel from server/
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "server")))
-from model import CNNModel
+from config.settings import FLSettings, settings as _default_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,40 +28,38 @@ logger = logging.getLogger(__name__)
 # 1. Weight Loading
 # ---------------------------------------------------------------------------
 
-def load_global_weights(model: nn.Module, weights_dict: Dict[str, torch.Tensor]) -> None:
+def load_global_weights(
+    model: nn.Module,
+    weights_dict: Dict[str, torch.Tensor],
+) -> None:
     """
-    Safely loads the server's global weights into the local model.
+    Safely loads server global weights into the local model.
 
-    Validates that layer names match exactly to detect architecture drift
-    between server and client versions.
+    Validates that layer names and shapes match exactly.
+    Raises KeyError if keys diverge (architecture drift detection).
+    Raises RuntimeError if tensor shapes are incompatible.
 
     Args:
-        model:       The local PyTorch model instance to update.
-        weights_dict: State dict received from the server (CPU tensors).
-
-    Raises:
-        KeyError:   If any layer key present in the server dict is missing
-                    from the local model (or vice-versa).
-        RuntimeError: If tensor shapes are incompatible.
+        model:        Local PyTorch model instance.
+        weights_dict: State dict from the server (CPU tensors).
     """
     local_keys  = set(model.state_dict().keys())
     server_keys = set(weights_dict.keys())
 
-    missing_in_local  = server_keys - local_keys
-    extra_in_local    = local_keys  - server_keys
+    missing = server_keys - local_keys
+    extra   = local_keys  - server_keys
 
-    if missing_in_local:
+    if missing:
         raise KeyError(
-            f"Server weights contain layers not found in local model: {missing_in_local}"
+            f"Server weights contain layers absent from local model: {missing}"
         )
-    if extra_in_local:
+    if extra:
         raise KeyError(
-            f"Local model contains layers not present in server weights: {extra_in_local}"
+            f"Local model has layers absent from server weights: {extra}"
         )
 
-    # strict=True ensures shape mismatches raise RuntimeError
     model.load_state_dict(weights_dict, strict=True)
-    logger.info("Global weights loaded into local model successfully.")
+    logger.debug("Global weights loaded into local model.")
 
 
 # ---------------------------------------------------------------------------
@@ -73,94 +67,95 @@ def load_global_weights(model: nn.Module, weights_dict: Dict[str, torch.Tensor])
 # ---------------------------------------------------------------------------
 
 def train_local_model(
-    model: nn.Module,
+    model:      nn.Module,
     dataloader: DataLoader,
-    epochs: int = 1,
-    lr: float = float(os.getenv("CLIENT_LR", "0.01")),
-    device: str = "cpu",
-    optimizer_type: str = os.getenv("CLIENT_OPTIMIZER", "sgd"),
+    cfg:        Optional[FLSettings] = None,
+    epochs:     Optional[int]        = None,
+    lr:         Optional[float]      = None,
+    device:     Optional[str]        = None,
 ) -> Dict[str, torch.Tensor]:
     """
-    Runs a real local training loop on the client's private data.
+    Runs a genuine local training loop on the client's private data.
 
-    Uses:
-      - CrossEntropyLoss (standard for classification).
-      - Adam or SGD depending on CLIENT_OPTIMIZER env var.
-      - Genuine forward pass, backward pass, and optimizer step each batch.
+    All hyperparameters default to values from FLSettings unless
+    explicitly overridden (useful for testing).
+
+    Pipeline per batch:
+        1. Forward pass through model
+        2. CrossEntropyLoss computation
+        3. Backward pass (real gradients)
+        4. Optimizer step (SGD or Adam per settings.OPTIMIZER)
 
     Args:
-        model:          The local model (already loaded with global weights).
-        dataloader:     DataLoader over the client's local dataset.
-        epochs:         Number of local epochs to run.
-        lr:             Learning rate (from env CLIENT_LR, default 0.01).
-        device:         Torch device string, e.g. "cpu" or "cuda".
-        optimizer_type: "sgd" or "adam" (from env CLIENT_OPTIMIZER).
+        model:      Local model (pre-loaded with global weights).
+        dataloader: DataLoader over client's local partition.
+        cfg:        FLSettings instance (defaults to module-level singleton).
+        epochs:     Override for LOCAL_EPOCHS.
+        lr:         Override for LEARNING_RATE.
+        device:     Override for DEVICE.
 
     Returns:
-        Updated state_dict (Dict[str, Tensor]) on CPU after training.
+        Updated state dict (CPU tensors, detached from computation graph).
 
     Raises:
-        ValueError: If dataloader is empty.
+        ValueError: If dataloader dataset is empty.
     """
-    if len(dataloader.dataset) == 0:
-        raise ValueError("Local dataloader is empty — cannot train.")
+    cfg = cfg or _default_settings
 
-    model = model.to(device)
+    _epochs = epochs if epochs is not None else cfg.LOCAL_EPOCHS
+    _lr     = lr     if lr     is not None else cfg.LEARNING_RATE
+    _device = device if device is not None else cfg.DEVICE
+
+    if len(dataloader.dataset) == 0:
+        raise ValueError("Dataloader is empty — cannot train.")
+
+    model = model.to(_device)
     model.train()
 
     criterion = nn.CrossEntropyLoss()
 
-    if optimizer_type.lower() == "adam":
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+    if cfg.OPTIMIZER == "adam":
+        optimizer = optim.Adam(model.parameters(), lr=_lr)
     else:
-        # Default to SGD with momentum
-        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+        optimizer = optim.SGD(model.parameters(), lr=_lr, momentum=0.9)
 
-    total_batches_processed = 0
+    total_batches = 0
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(1, _epochs + 1):
         epoch_loss = 0.0
         correct    = 0
         total      = 0
 
-        for batch_idx, (data, targets) in enumerate(dataloader):
-            data    = data.to(device)
-            targets = targets.to(device)
+        for data, targets in dataloader:
+            data    = data.to(_device)
+            targets = targets.to(_device)
 
             optimizer.zero_grad()
 
-            # Real forward pass
-            outputs = model(data)
-
-            # Real loss computation
-            loss = criterion(outputs, targets)
-
-            # Real backward pass
-            loss.backward()
-
-            # Real parameter update
-            optimizer.step()
+            outputs = model(data)        # real forward pass
+            loss    = criterion(outputs, targets)  # real loss
+            loss.backward()              # real gradients
+            optimizer.step()             # real update
 
             epoch_loss += loss.item()
             _, predicted = torch.max(outputs, dim=1)
             correct      += (predicted == targets).sum().item()
             total        += targets.size(0)
-            total_batches_processed += 1
+            total_batches += 1
 
-        avg_loss = epoch_loss / len(dataloader)
-        accuracy = correct / total if total > 0 else 0.0
+        avg_loss = epoch_loss / max(len(dataloader), 1)
+        accuracy = correct   / max(total, 1)
 
         logger.info(
-            f"[Local Training] Epoch {epoch}/{epochs} — "
-            f"Loss: {avg_loss:.4f} | Accuracy: {accuracy * 100:.2f}%"
+            f"[Local] Epoch {epoch}/{_epochs} | "
+            f"Loss: {avg_loss:.4f} | Acc: {accuracy*100:.2f}%"
         )
 
     logger.info(
-        f"[Local Training] Complete. {epochs} epoch(s), "
-        f"{total_batches_processed} batches processed."
+        f"[Local] Training complete — {_epochs} epoch(s), "
+        f"{total_batches} batches."
     )
 
-    # Return updated weights isolated on CPU
     return get_updated_weights(model)
 
 
@@ -170,18 +165,11 @@ def train_local_model(
 
 def get_updated_weights(model: nn.Module) -> Dict[str, torch.Tensor]:
     """
-    Returns a CPU copy of the model's current state dict.
+    Returns a detached CPU copy of the model's current state dict.
 
-    Detaches all tensors from the computational graph to ensure safe
-    serialization and transmission.
-
-    Args:
-        model: A trained (or partially trained) PyTorch model.
-
-    Returns:
-        A deep-copied state dict with all tensors on CPU, detached.
+    Safe for serialisation and transmission — no computation graph references.
     """
     return {
-        key: tensor.cpu().detach().clone()
-        for key, tensor in model.state_dict().items()
+        k: v.cpu().detach().clone()
+        for k, v in model.state_dict().items()
     }
