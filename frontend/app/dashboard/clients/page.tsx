@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PlayCircle, ShieldAlert, Cpu, ArrowUpRight, CopyCheck, AlertTriangle } from "lucide-react";
 
@@ -18,6 +18,13 @@ export default function ClientsPage() {
     const [isSimulating, setIsSimulating] = useState(false);
     const [clientUpdates, setClientUpdates] = useState<ClientUpdate[]>([]);
 
+    // Dataset Upload State
+    const [uploadClientId, setUploadClientId] = useState("");
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [datasetUrl, setDatasetUrl] = useState("");
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "info", msg: string } | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     // Auto-generate realistic client ID on load
     useEffect(() => {
         setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
@@ -63,6 +70,83 @@ export default function ClientsPage() {
             alert("Simulation request failed to reach server.");
         } finally {
             setIsSimulating(false);
+        }
+    };
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            setSelectedFile(e.target.files[0]);
+        }
+    };
+
+    const handleDatasetUpload = async () => {
+        if (!uploadClientId || (!selectedFile && !datasetUrl)) {
+            setUploadStatus({ type: "error", msg: "Please provide a Client ID and either a dataset file or URL." });
+            return;
+        }
+
+        setIsUploading(true);
+        setUploadStatus({ type: "info", msg: "Uploading and starting training..." });
+
+        const formData = new FormData();
+        formData.append("client_id", uploadClientId);
+        if (selectedFile) formData.append("file", selectedFile);
+        if (datasetUrl) formData.append("dataset_url", datasetUrl);
+
+        try {
+            const res = await fetch("http://localhost:8000/fl/api/dataset/upload", {
+                method: "POST",
+                body: formData,
+            });
+
+            if (res.ok) {
+                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
+                if (fileInputRef.current) fileInputRef.current.value = "";
+                setSelectedFile(null);
+                setDatasetUrl("");
+            } else {
+                const data = await res.json();
+                setUploadStatus({ type: "error", msg: data.detail || "Failed to upload dataset." });
+            }
+        } catch (e) {
+            setUploadStatus({ type: "error", msg: "Network error occurred." });
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
+    const handleFetchWeights = async () => {
+        if (!uploadClientId) {
+            setUploadStatus({ type: "error", msg: "Please enter the Client ID to fetch weights." });
+            return;
+        }
+
+        try {
+            setUploadStatus({ type: "info", msg: "Checking weights..." });
+            const res = await fetch(`http://localhost:8000/fl/api/model/weights/${uploadClientId}`);
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                setUploadStatus({
+                    type: "error",
+                    msg: data.detail || "Weights not found. Training may still be in progress."
+                });
+                return;
+            }
+
+            // If ok, trigger file download natively
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `weights_${uploadClientId}.pt`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+
+            setUploadStatus({ type: "success", msg: "Weights downloaded successfully!" });
+        } catch (e) {
+            setUploadStatus({ type: "error", msg: "Network error occurred." });
         }
     };
 
@@ -118,8 +202,8 @@ export default function ClientsPage() {
                             onClick={handleSimulate}
                             disabled={isSimulating}
                             className={`transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-lg h-[42px] ${isMalicious
-                                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/50'
-                                    : 'bg-indigo-500 hover:bg-indigo-600 text-white shadow-indigo-900/50'
+                                ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/50'
+                                : 'bg-indigo-500 hover:bg-indigo-600 text-white shadow-indigo-900/50'
                                 } ${isSimulating ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             <PlayCircle className={`w-5 h-5 ${isSimulating ? 'animate-spin' : ''}`} />

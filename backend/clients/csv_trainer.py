@@ -132,32 +132,61 @@ class UniversalCSVDataset(Dataset):
         self._parse(csv_path, has_header, max_rows)
 
     def _parse(self, path: str, has_header: bool, max_rows: int):
-        raw_features: List[List[float]] = []
+        raw_rows: List[List[str]] = []
         skipped = 0
 
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.reader(f)
             if has_header:
-                next(reader)
+                next(reader, None)
 
             for i, row in enumerate(reader):
                 if i >= max_rows:
                     break
+                if not row or len(row) < 2:
+                    skipped += 1
+                    continue
                 try:
                     label_str = row[-1].strip()
                     if label_str not in self.label_map:
                         skipped += 1
                         continue
-                    feats = [float(v) for v in row[:-1]]
-                    raw_features.append(feats)
+                    
                     self.labels.append(self.label_map[label_str])
-                except (ValueError, IndexError):
+                    raw_rows.append([v.strip() for v in row[:-1]])
+                except IndexError:
                     skipped += 1
                     continue
 
-        if not raw_features:
+        if not raw_rows:
             logger.warning(f"No valid rows parsed from {os.path.basename(path)}.")
             return
+
+        # Infer types column by column and convert
+        num_features = len(raw_rows[0])
+        parsed_cols = [[] for _ in range(num_features)]
+
+        for col_idx in range(num_features):
+            is_numeric = True
+            for r in raw_rows:
+                try:
+                    float(r[col_idx])
+                except ValueError:
+                    is_numeric = False
+                    break
+
+            if is_numeric:
+                for r in raw_rows:
+                    parsed_cols[col_idx].append(float(r[col_idx]))
+            else:
+                # String column -> categorical (label encode)
+                unique_vals = sorted(list(set(r[col_idx] for r in raw_rows)))
+                val_to_idx = {v: float(idx) for idx, v in enumerate(unique_vals)}
+                for r in raw_rows:
+                    parsed_cols[col_idx].append(val_to_idx[r[col_idx]])
+
+        # Transpose columns back to rows
+        raw_features = list(zip(*parsed_cols))
 
         # Convert to tensor and normalise per-column
         feat_tensor = torch.tensor(raw_features, dtype=torch.float32)
