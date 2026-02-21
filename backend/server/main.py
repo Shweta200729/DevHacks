@@ -81,6 +81,9 @@ async def startup_event():
             current_version_id = storage.save_model_version(global_model.get_weights(), current_version_num)
             logger.info("Initialized Brand New Global Model (Version 1).")
 
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    
     # Load MNIST Validation Set
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
     val_dataset = datasets.MNIST('../data', train=False, download=True, transform=transform)
