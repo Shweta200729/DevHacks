@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BorderBeam } from "@/components/ui/border-beam";
 import {
@@ -21,7 +21,6 @@ interface MetricsData {
 export default function OverviewPage() {
     const [data, setData] = useState<MetricsData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
     const fetchMetrics = async () => {
         try {
@@ -45,6 +44,83 @@ export default function OverviewPage() {
         const interval = setInterval(fetchMetrics, 3000);
         return () => clearInterval(interval);
     }, []);
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            setSelectedFile(e.target.files[0]);
+        }
+    };
+
+    const handleDatasetUpload = async () => {
+        if (!uploadClientId || (!selectedFile && !datasetUrl)) {
+            setUploadStatus({ type: "error", msg: "Please provide a Client ID and either a dataset file or URL." });
+            return;
+        }
+
+        setIsUploading(true);
+        setUploadStatus({ type: "info", msg: "Uploading and starting training..." });
+
+        const formData = new FormData();
+        formData.append("client_id", uploadClientId);
+        if (selectedFile) formData.append("file", selectedFile);
+        if (datasetUrl) formData.append("dataset_url", datasetUrl);
+
+        try {
+            const res = await fetch("http://localhost:8000/fl/api/dataset/upload", {
+                method: "POST",
+                body: formData,
+            });
+
+            if (res.ok) {
+                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
+                if (fileInputRef.current) fileInputRef.current.value = "";
+                setSelectedFile(null);
+                setDatasetUrl("");
+            } else {
+                const data = await res.json().catch(() => ({}));
+                setUploadStatus({ type: "error", msg: data.detail || "Failed to upload dataset." });
+            }
+        } catch (e) {
+            setUploadStatus({ type: "error", msg: "Network error occurred." });
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
+    const handleFetchWeights = async () => {
+        if (!uploadClientId) {
+            setUploadStatus({ type: "error", msg: "Please enter the Client ID to fetch weights." });
+            return;
+        }
+
+        try {
+            setUploadStatus({ type: "info", msg: "Checking weights..." });
+            const res = await fetch(`http://localhost:8000/fl/api/model/weights/${uploadClientId}`);
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                setUploadStatus({
+                    type: "error",
+                    msg: data.detail || "Weights not found. Training may still be in progress."
+                });
+                return;
+            }
+
+            // If ok, trigger file download natively
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `weights_${uploadClientId}.pt`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+
+            setUploadStatus({ type: "success", msg: "Weights downloaded successfully!" });
+        } catch (e) {
+            setUploadStatus({ type: "error", msg: "Network error occurred." });
+        }
+    };
 
     const calculateTotalClients = () => {
         if (!data?.aggregations) return { acc: 0, rej: 0 };
@@ -172,6 +248,84 @@ export default function OverviewPage() {
                     </Card>
                 ))}
             </div>
+
+            {/* User Real Local Dataset Upload Controller */}
+            <Card className="bg-white border-slate-200 shadow-sm relative overflow-hidden">
+                <CardHeader>
+                    <CardTitle className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                        <Cpu className="w-5 h-5 text-indigo-500" />
+                        Local Dataset Training
+                    </CardTitle>
+                    <p className="text-slate-500 text-sm max-w-3xl mt-1">
+                        Upload your personal dataset (.csv) or provide a remote URL. The server will spin up a decentralized training worker in the background exclusively containing your local data. Once training is complete, fetch your customized locally-trained weights (.pt).
+                    </p>
+                </CardHeader>
+                <CardContent>
+                    <div className="flex flex-col gap-5">
+                        <div className="flex flex-wrap gap-4 items-end">
+                            <div className="flex flex-col gap-2">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Target Client ID</label>
+                                <input
+                                    className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 w-64 transition-all font-mono text-sm"
+                                    value={uploadClientId}
+                                    onChange={(e) => setUploadClientId(e.target.value)}
+                                    placeholder="e.g. MyEdgeNode-1"
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-2">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Dataset File OR URL</label>
+                                <div className="flex flex-col gap-2">
+                                    <input
+                                        type="file"
+                                        ref={fileInputRef}
+                                        onChange={handleFileChange}
+                                        className="text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 transition-all cursor-pointer"
+                                    />
+                                    <div className="text-xs text-slate-400 font-medium tracking-wide">— OR —</div>
+                                    <input
+                                        type="text"
+                                        placeholder="https://example.com/dataset.csv"
+                                        value={datasetUrl}
+                                        onChange={(e) => setDatasetUrl(e.target.value)}
+                                        className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 w-64 transition-all text-sm"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3 ml-auto">
+                                <button
+                                    onClick={handleDatasetUpload}
+                                    disabled={isUploading}
+                                    className={`transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm ${isUploading
+                                        ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                        : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                                        }`}
+                                >
+                                    <ArrowUpRight className={`w-4 h-4 ${isUploading ? 'animate-bounce' : ''}`} />
+                                    {isUploading ? 'Uploading...' : 'Upload & Train'}
+                                </button>
+
+                                <button
+                                    onClick={handleFetchWeights}
+                                    className="transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                >
+                                    Fetch Weights
+                                </button>
+                            </div>
+                        </div>
+
+                        {uploadStatus && (
+                            <div className={`p-4 rounded-lg text-sm font-medium border ${uploadStatus.type === "success" ? "bg-green-50 text-green-700 border-green-200" :
+                                uploadStatus.type === "error" ? "bg-red-50 text-red-700 border-red-200" :
+                                    "bg-blue-50 text-blue-700 border-blue-200"
+                                }`}>
+                                {uploadStatus.msg}
+                            </div>
+                        )}
+                    </div>
+                </CardContent>
+            </Card>
 
             {/* ── Real-Time Insights Panel ─────────────────────────────────── */}
             <Card className="bg-linear-to-br from-slate-900 to-slate-800 border-slate-700 shadow-xl text-white">
