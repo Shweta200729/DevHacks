@@ -103,7 +103,7 @@ export default function LogsPage() {
                 </div>
             </div>
 
-            <Card className="bg-slate-950 border-slate-900 shadow-xl flex-grow flex flex-col overflow-hidden">
+            <Card className="bg-slate-950 border-slate-900 shadow-xl grow flex flex-col overflow-hidden">
                 <CardHeader className="border-b border-slate-800 bg-slate-900 py-3 flex flex-row items-center justify-between">
                     <CardTitle className="text-sm font-mono text-slate-300 flex items-center gap-2">
                         <TerminalSquare className="w-4 h-4 text-slate-400" />
@@ -131,7 +131,7 @@ export default function LogsPage() {
                                         {log.node}
                                     </span>
                                 )}
-                                <span className="text-slate-300 break-words flex-grow">
+                                <span className="text-slate-300 text-wrap break-words grow">
                                     {log.message}
                                 </span>
                             </div>
