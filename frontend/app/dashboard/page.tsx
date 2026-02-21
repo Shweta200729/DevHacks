@@ -143,7 +143,10 @@ export default function OverviewPage() {
                                         <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} domain={[0, 1]} tickFormatter={t => `${(t * 100).toFixed(0)}%`} />
                                         <Tooltip
                                             contentStyle={{ backgroundColor: "#fff", borderColor: "#e2e8f0", borderRadius: "8px" }}
-                                            formatter={(v: number) => [`${(v * 100).toFixed(2)}%`, "Accuracy"]}
+                                            formatter={(v: any) => {
+                                                const numericValue = typeof v === 'number' ? v : Number(v);
+                                                return [`${(numericValue * 100).toFixed(2)}%`, "Accuracy"];
+                                            }}
                                         />
                                         <Line type="monotone" dataKey="accuracy" stroke="#2563eb" strokeWidth={3}
                                             dot={{ fill: "#2563eb", r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />
@@ -172,7 +175,10 @@ export default function OverviewPage() {
                                         <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
                                         <Tooltip
                                             contentStyle={{ backgroundColor: "#fff", borderColor: "#e2e8f0", borderRadius: "8px" }}
-                                            formatter={(v: number) => [v.toFixed(4), "Loss"]}
+                                            formatter={(v: any) => {
+                                                const numericValue = typeof v === 'number' ? v : Number(v);
+                                                return [numericValue.toFixed(4), "Loss"];
+                                            }}
                                         />
                                         <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3}
                                             dot={{ fill: "#ef4444", r: 4 }} activeDot={{ r: 6, strokeWidth: 0 }} />

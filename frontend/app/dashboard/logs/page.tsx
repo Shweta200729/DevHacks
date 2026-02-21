@@ -112,7 +112,7 @@ export default function LogsPage() {
                                     [{log.type}]
                                 </span>
                                 <span className="text-slate-400 shrink-0 w-32 truncate">{log.node}</span>
-                                <span className="text-slate-300 break-words grow">{log.message}</span>
+                                <span className="text-slate-300 break-all grow">{log.message}</span>
                             </div>
                         ))}
 
