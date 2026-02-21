@@ -50,7 +50,7 @@ export default function Hero() {
             title="Accelerate AI Innovation"
             subtitle="Secure, scalable infrastructure for building the next generation of artificial intelligence. Orchestrate complex workflows with unparalleled efficiency."
             ctaText="Start Building Now"
-            ctaHref="/signup"
+            ctaHref="/dashboard"
             icons={demoIcons}
         />
     );

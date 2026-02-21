@@ -62,7 +62,7 @@ export default function EvaluationPage() {
                                     <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={(t) => `${(t * 100).toFixed(0)}%`} />
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
-                                        formatter={(val: number | string | Array<number | string>) => [`${(Number(val) * 100).toFixed(2)}%`, '']}
+                                        formatter={(val) => [val !== undefined ? `${(Number(val) * 100).toFixed(2)}%` : '', '']}
                                     />
                                     <Legend wrapperStyle={{ paddingTop: '20px' }} />
                                     <Line

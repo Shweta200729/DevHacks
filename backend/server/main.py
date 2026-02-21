@@ -280,6 +280,103 @@ async def receive_update(
 
 
 # -------------------------------------------------------------
+# Model Registry & Download
+# -------------------------------------------------------------
+
+
+@app.get("/versions")
+async def get_versions():
+    """List all model versions for the Models Registry page."""
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
+    try:
+        versions = (
+            storage.supabase.table("model_versions")
+            .select("*")
+            .order("version_num", desc=True)
+            .limit(50)
+            .execute()
+        )
+        return {"data": versions.data}
+    except Exception as e:
+        logger.error(f"Failed to fetch versions: {e}")
+        return {"data": []}
+
+
+@app.get("/model/download")
+async def download_model(version_id: str = None):
+    """Download the .pt model file for a given version."""
+    from fastapi.responses import FileResponse
+
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
+
+    try:
+        if version_id:
+            row = (
+                storage.supabase.table("model_versions")
+                .select("file_path")
+                .eq("id", version_id)
+                .single()
+                .execute()
+            )
+            file_path = row.data.get("file_path") if row.data else None
+        else:
+            latest = storage.get_latest_version()
+            file_path = latest.get("file_path")
+
+        if file_path and os.path.exists(file_path):
+            return FileResponse(
+                path=file_path,
+                filename=os.path.basename(file_path),
+                media_type="application/octet-stream",
+            )
+        raise HTTPException(404, "Model file not found on disk.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        raise HTTPException(500, f"Download error: {e}")
+
+
+# -------------------------------------------------------------
+# Admin Configuration
+# -------------------------------------------------------------
+
+
+class ConfigUpdate(BaseModel):
+    dp_enabled: bool = True
+    dp_clip_norm: float = 10.0
+    dp_noise_mult: float = 1.0
+    min_update_queue: int = 3
+
+
+@app.get("/admin/config")
+async def get_config():
+    """Return current DP and federation settings."""
+    return {
+        "dp_enabled": DP_ENABLED,
+        "dp_clip_norm": DP_CLIP_NORM,
+        "dp_noise_mult": DP_NOISE_MULT,
+        "min_update_queue": MIN_UPDATE_QUEUE,
+    }
+
+
+@app.post("/admin/config")
+async def set_config(cfg: ConfigUpdate):
+    """Hot-update DP and federation settings without restarting the server."""
+    global DP_ENABLED, DP_CLIP_NORM, DP_NOISE_MULT, MIN_UPDATE_QUEUE
+    DP_ENABLED = cfg.dp_enabled
+    DP_CLIP_NORM = cfg.dp_clip_norm
+    DP_NOISE_MULT = cfg.dp_noise_mult
+    MIN_UPDATE_QUEUE = cfg.min_update_queue
+    logger.info(
+        f"Config updated: DP={DP_ENABLED}, C={DP_CLIP_NORM}, σ={DP_NOISE_MULT}, Q={MIN_UPDATE_QUEUE}"
+    )
+    return {"status": "ok"}
+
+
+# -------------------------------------------------------------
 # Local Simulation Helper
 # -------------------------------------------------------------
 class SimulationRequest(BaseModel):

@@ -8,7 +8,8 @@ import {
     Users,
     Network,
     LineChart,
-    TerminalSquare
+    TerminalSquare,
+    Settings
 } from "lucide-react";
 
 export function Sidebar() {
@@ -20,6 +21,7 @@ export function Sidebar() {
         { name: "Models", href: "/dashboard/models", icon: Network },
         { name: "Evaluation", href: "/dashboard/evaluation", icon: LineChart },
         { name: "Logs", href: "/dashboard/logs", icon: TerminalSquare },
+        { name: "Settings", href: "/dashboard/settings", icon: Settings },
     ];
 
     const [escrowBalance, setEscrowBalance] = useState<number>(0);
@@ -47,7 +49,7 @@ export function Sidebar() {
     }, []);
 
     return (
-        <div className="w-[240px] flex-shrink-0 bg-white border-r border-slate-200 min-h-screen flex flex-col pt-6 z-20 shadow-sm relative">
+        <div className="w-[240px] shrink-0 bg-white border-r border-slate-200 min-h-screen flex flex-col pt-6 z-20 shadow-sm relative">
             <div className="px-6 mb-8 flex items-center gap-2">
                 <div className="bg-blue-100 p-1.5 rounded-lg border border-blue-200">
                     <Network className="w-5 h-5 text-blue-600" />
