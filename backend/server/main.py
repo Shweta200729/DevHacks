@@ -87,21 +87,22 @@ pending_updates: List[tuple] = []
 MIN_UPDATE_QUEUE: int = int(os.getenv("MIN_AGGREGATE_SIZE", "1"))
 
 # Differential Privacy settings  (set to "false" / 0 to disable)
-DP_ENABLED:    bool  = os.getenv("DP_ENABLED", "true").lower() == "true"
-DP_CLIP_NORM:  float = float(os.getenv("DP_CLIP_NORM", "10.0"))
+DP_ENABLED: bool = os.getenv("DP_ENABLED", "true").lower() == "true"
+DP_CLIP_NORM: float = float(os.getenv("DP_CLIP_NORM", "10.0"))
 DP_NOISE_MULT: float = float(os.getenv("DP_NOISE_MULT", "1.0"))
 
 # Validation loader (loaded once at startup)
 val_loader: DataLoader = None
 
 # Active version trackers
-current_version_id:  int = None
+current_version_id: int = None
 current_version_num: int = 0
 
 
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -133,15 +134,16 @@ async def startup_event():
                     torch.load(latest["file_path"], weights_only=True)
                 )
                 current_version_num = latest["version_num"]
-                current_version_id  = latest["id"]
+                current_version_id = latest["id"]
                 logger.info(f"Loaded global model: Version {current_version_num}")
             except Exception as exc:
-                logger.warning(
-                    f"Could not load checkpoint ({exc}). Starting fresh."
-                )
-                _init_fresh_model()
+                logger.warning(f"Could not load checkpoint ({exc}). Starting fresh.")
+                _init_fresh_model(latest["version_num"] + 1)
         else:
-            _init_fresh_model()
+            next_version = (
+                (latest["version_num"] + 1) if latest.get("version_num", 0) > 0 else 1
+            )
+            _init_fresh_model(next_version)
 
     # ── validation dataset ───────────────────────────────────────────────────
     ssl._create_default_https_context = ssl._create_unverified_context
@@ -155,19 +157,20 @@ async def startup_event():
     logger.info("MNIST validation set loaded.")
 
 
-def _init_fresh_model():
-    """Helper: save a brand-new random model as version 1."""
+def _init_fresh_model(start_version: int = 1):
+    """Helper: save a brand-new random model as start_version."""
     global current_version_num, current_version_id
-    current_version_num = 1
+    current_version_num = start_version
     current_version_id = storage.save_model_version(
         global_model.get_weights(), current_version_num
     )
-    logger.info("Initialised fresh global model (Version 1).")
+    logger.info(f"Initialised fresh global model (Version {current_version_num}).")
 
 
 # ---------------------------------------------------------------------------
 # Core aggregation logic
 # ---------------------------------------------------------------------------
+
 
 async def _aggregate_and_update(updates: List[tuple]) -> Dict[str, float]:
     """
@@ -230,6 +233,7 @@ async def _aggregate_and_update(updates: List[tuple]) -> Dict[str, float]:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.get("/model")
 async def get_global_model():
     """
@@ -244,6 +248,7 @@ async def get_global_model():
     buf.seek(0)
 
     from fastapi.responses import StreamingResponse
+
     return StreamingResponse(
         buf,
         media_type="application/octet-stream",
@@ -273,8 +278,8 @@ async def get_metrics():
     )
     return {
         "current_version": current_version_num,
-        "evaluations":     evals.data,
-        "aggregations":    aggs.data,
+        "evaluations": evals.data,
+        "aggregations": aggs.data,
         "pending_queue_size": len(pending_updates),
     }
 
@@ -301,6 +306,7 @@ async def get_clients():
 # ---------------------------------------------------------------------------
 # POST /update  — main FL update handler
 # ---------------------------------------------------------------------------
+
 
 @app.post("/update")
 async def receive_update(
@@ -336,7 +342,7 @@ async def receive_update(
     # ── snapshot global weights for detection (no lock needed — read only) ────
     async with model_lock:
         global_weights = global_model.get_weights()
-        curr_vid       = current_version_id
+        curr_vid = current_version_id
 
     # ── malicious detection ───────────────────────────────────────────────────
     status, reason, norm_val, dist_val = detect_update(client_weights, global_weights)
@@ -355,9 +361,7 @@ async def receive_update(
     async with model_lock:
         pending_updates.append((client_id, client_weights))
         q_len = len(pending_updates)
-        logger.info(
-            f"ACCEPTED [{client_id}] — queue {q_len}/{MIN_UPDATE_QUEUE}"
-        )
+        logger.info(f"ACCEPTED [{client_id}] — queue {q_len}/{MIN_UPDATE_QUEUE}")
 
         if q_len >= MIN_UPDATE_QUEUE:
             # Drain the queue atomically inside the lock
@@ -377,6 +381,7 @@ def _aggregate_batch(batch: List[tuple]):
     Creates a new event loop for the async call.
     """
     import asyncio as _asyncio
+
     loop = _asyncio.new_event_loop()
     try:
         loop.run_until_complete(_run_aggregation(batch))
@@ -394,6 +399,7 @@ async def _run_aggregation(batch: List[tuple]):
 # Dataset upload & per-client weight serving
 # ---------------------------------------------------------------------------
 
+
 def train_client_background(client_id: str, file_path: str):
     """
     Background task: trains a local CNN on an uploaded dataset
@@ -406,12 +412,16 @@ def train_client_background(client_id: str, file_path: str):
 
     logger.info(f"[BG Train] Starting for client {client_id} on {file_path}")
 
-    client_dir   = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
     os.makedirs(client_dir, exist_ok=True)
     weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
 
     try:
-        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        sys.path.insert(
+            0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        )
         from clients.local_training import load_global_weights, train_local_model
 
         local_model = CNNModel()
@@ -422,6 +432,7 @@ def train_client_background(client_id: str, file_path: str):
                 return global_model.get_weights()
 
         import asyncio as _asyncio
+
         gw = _asyncio.run(_fetch())
         load_global_weights(local_model, gw)
 
@@ -447,7 +458,9 @@ def train_client_background(client_id: str, file_path: str):
 @app.get("/api/model/weights/{client_id}")
 async def get_client_weights(client_id: str):
     """Download the locally-trained .pt file for a specific client."""
-    client_dir   = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
     weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
 
     if os.path.exists(weights_path):
@@ -462,18 +475,16 @@ async def get_client_weights(client_id: str):
 @app.post("/api/dataset/upload")
 async def upload_dataset(
     background_tasks: BackgroundTasks,
-    client_id: str      = Form(...),
-    file: UploadFile    = File(None),
-    dataset_url: str    = Form(None),
+    client_id: str = Form(...),
+    file: UploadFile = File(None),
+    dataset_url: str = Form(None),
 ):
     """
     Accepts a dataset either as a direct upload or as a URL.
     Saves it to data/client_{id}/ and fires background local training.
     """
     if not file and not dataset_url:
-        raise HTTPException(
-            400, "Provide either a file upload or a dataset_url."
-        )
+        raise HTTPException(400, "Provide either a file upload or a dataset_url.")
 
     client_dir = os.path.join(
         os.path.dirname(__file__), "..", "data", f"client_{client_id}"
@@ -492,18 +503,19 @@ async def upload_dataset(
         logger.info(f"Dataset '{file.filename}' saved for client {client_id}.")
 
     elif dataset_url:
-        parsed   = urlparse(dataset_url)
+        parsed = urlparse(dataset_url)
         filename = os.path.basename(parsed.path) or "dataset.csv"
         file_path = os.path.join(client_dir, filename)
         try:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
-            ctx.verify_mode    = ssl.CERT_NONE
+            ctx.verify_mode = ssl.CERT_NONE
             req = urllib.request.Request(
                 dataset_url, headers={"User-Agent": "Mozilla/5.0"}
             )
-            with urllib.request.urlopen(req, context=ctx) as resp, \
-                 open(file_path, "wb") as out:
+            with urllib.request.urlopen(req, context=ctx) as resp, open(
+                file_path, "wb"
+            ) as out:
                 shutil.copyfileobj(resp, out)
         except Exception as exc:
             raise HTTPException(500, f"Failed to download from URL: {exc}")
@@ -517,9 +529,10 @@ async def upload_dataset(
 # Simulation helper  (fires a synthetic round for demo / testing)
 # ---------------------------------------------------------------------------
 
+
 class SimulationRequest(BaseModel):
-    client_name:          str
-    is_malicious:         bool  = False
+    client_name: str
+    is_malicious: bool = False
     malicious_multiplier: float = 50.0
 
 
@@ -541,9 +554,8 @@ async def run_local_simulation(
 
         # Fetch current global weights synchronously
         import asyncio as _as
-        gw = _as.run(
-            _async_get_weights()
-        )
+
+        gw = _as.run(_async_get_weights())
 
         local_model = CNNModel()
         local_model.set_weights(gw)
@@ -553,7 +565,7 @@ async def run_local_simulation(
         criterion = torch.nn.CrossEntropyLoss()
 
         for _ in range(5):
-            inputs  = torch.randn(16, 1, 28, 28)
+            inputs = torch.randn(16, 1, 28, 28)
             targets = torch.randint(0, 10, (16,))
             optimizer.zero_grad()
             loss = criterion(local_model(inputs), targets)
@@ -561,8 +573,7 @@ async def run_local_simulation(
             optimizer.step()
 
         client_weights = {
-            k: v.cpu().detach().clone()
-            for k, v in local_model.state_dict().items()
+            k: v.cpu().detach().clone() for k, v in local_model.state_dict().items()
         }
 
         if malicious:
@@ -572,7 +583,9 @@ async def run_local_simulation(
         # Detect & queue
         status, reason, norm_val, dist_val = detect_update(client_weights, gw)
         if storage:
-            storage.log_client_update(vid, db_client_id, status, norm_val, dist_val, reason)
+            storage.log_client_update(
+                vid, db_client_id, status, norm_val, dist_val, reason
+            )
 
         if status == "ACCEPT":
             _as.run(_enqueue_and_maybe_aggregate(db_client_id, client_weights))
@@ -594,7 +607,9 @@ async def _async_get_weights() -> Dict[str, torch.Tensor]:
         return global_model.get_weights()
 
 
-async def _enqueue_and_maybe_aggregate(client_id: str, weights: Dict[str, torch.Tensor]):
+async def _enqueue_and_maybe_aggregate(
+    client_id: str, weights: Dict[str, torch.Tensor]
+):
     global pending_updates
     async with model_lock:
         pending_updates.append((client_id, weights))
@@ -608,19 +623,20 @@ async def _enqueue_and_maybe_aggregate(client_id: str, weights: Dict[str, torch.
 # Admin config  (hot-update runtime settings without restart)
 # ---------------------------------------------------------------------------
 
+
 class ConfigUpdate(BaseModel):
-    dp_enabled:       bool  = True
-    dp_clip_norm:     float = 10.0
-    dp_noise_mult:    float = 1.0
-    min_update_queue: int   = 1
+    dp_enabled: bool = True
+    dp_clip_norm: float = 10.0
+    dp_noise_mult: float = 1.0
+    min_update_queue: int = 1
 
 
 @app.get("/admin/config")
 async def get_config():
     return {
-        "dp_enabled":       DP_ENABLED,
-        "dp_clip_norm":     DP_CLIP_NORM,
-        "dp_noise_mult":    DP_NOISE_MULT,
+        "dp_enabled": DP_ENABLED,
+        "dp_clip_norm": DP_CLIP_NORM,
+        "dp_noise_mult": DP_NOISE_MULT,
         "min_update_queue": MIN_UPDATE_QUEUE,
     }
 
@@ -628,9 +644,9 @@ async def get_config():
 @app.post("/admin/config")
 async def set_config(cfg: ConfigUpdate):
     global DP_ENABLED, DP_CLIP_NORM, DP_NOISE_MULT, MIN_UPDATE_QUEUE
-    DP_ENABLED       = cfg.dp_enabled
-    DP_CLIP_NORM     = cfg.dp_clip_norm
-    DP_NOISE_MULT    = cfg.dp_noise_mult
+    DP_ENABLED = cfg.dp_enabled
+    DP_CLIP_NORM = cfg.dp_clip_norm
+    DP_NOISE_MULT = cfg.dp_noise_mult
     MIN_UPDATE_QUEUE = cfg.min_update_queue
     logger.info(
         f"Config updated: DP={DP_ENABLED}, C={DP_CLIP_NORM}, "
@@ -642,6 +658,7 @@ async def set_config(cfg: ConfigUpdate):
 # ---------------------------------------------------------------------------
 # Model registry  (Dashboard: version list + global model download)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/versions")
 async def get_versions():
@@ -678,7 +695,7 @@ async def download_global_model(version_id: str = None):
             )
             file_path = row.data.get("file_path") if row.data else None
         else:
-            latest    = storage.get_latest_version()
+            latest = storage.get_latest_version()
             file_path = latest.get("file_path")
 
         if file_path and os.path.exists(file_path):
