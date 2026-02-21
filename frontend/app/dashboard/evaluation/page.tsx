@@ -15,7 +15,7 @@ export default function EvaluationPage() {
     useEffect(() => {
         const fetchMetrics = async () => {
             try {
-                const res = await fetch("http://localhost:8000/metrics");
+                const res = await fetch("http://localhost:8000/fl/metrics");
                 if (res.ok) {
                     const json = await res.json();
                     setEvaluations(json.evaluations.reverse());

@@ -22,8 +22,8 @@ export default function LogsPage() {
             // the /metrics and /clients endpoints to simulate a real log server.
             // In a production app, we'd add an /api/logs route filtering Winston or Stdout logs.
             const [metricsRes, clientsRes] = await Promise.all([
-                fetch("http://localhost:8000/metrics").catch(() => null),
-                fetch("http://localhost:8000/clients").catch(() => null)
+                fetch("http://localhost:8000/fl/metrics").catch(() => null),
+                fetch("http://localhost:8000/fl/clients").catch(() => null)
             ]);
 
             let mergedLogs: LogEntry[] = [];

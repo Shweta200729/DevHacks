@@ -27,7 +27,7 @@ export default function OverviewPage() {
 
     const fetchMetrics = async () => {
         try {
-            const res = await fetch("http://localhost:8000/metrics");
+            const res = await fetch("http://localhost:8000/fl/metrics");
             if (res.ok) {
                 const json = await res.json();
                 json.evaluations = json.evaluations.reverse();

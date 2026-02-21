@@ -2,6 +2,10 @@ import os
 import io
 import asyncio
 import logging
+import shutil
+import ssl
+import urllib.request
+from urllib.parse import urlparse
 from typing import Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
@@ -230,6 +234,44 @@ async def get_clients():
         return {"data": []}
 
 
+def train_client_background(client_id: str, file_path: str):
+    logger.info(
+        f"Starting background training for client {client_id} on dataset {file_path}"
+    )
+    import time
+
+    time.sleep(5)  # Simulate training time
+
+    # Save a fake weights file for this client to simulate completion
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
+    os.makedirs(client_dir, exist_ok=True)
+    weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
+
+    # For simulation, just save the global model's state dict or a dummy tensor
+    torch.save(global_model.state_dict() if global_model else {}, weights_path)
+    logger.info(f"Background training complete for client {client_id}. Weights saved.")
+
+
+@app.get("/api/model/weights/{client_id}")
+async def get_client_weights(client_id: str):
+    from fastapi.responses import FileResponse
+
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
+    weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
+
+    if os.path.exists(weights_path):
+        return FileResponse(
+            weights_path,
+            filename=f"weights_{client_id}.pt",
+            media_type="application/octet-stream",
+        )
+    raise HTTPException(404, "Weights not found or training not complete yet.")
+
+
 @app.post("/api/dataset/upload")
 async def upload_dataset(
     background_tasks: BackgroundTasks,
@@ -241,11 +283,15 @@ async def upload_dataset(
     Uploads a dataset for a specific client (via file upload or URL) and triggers background training.
     """
     if not file and not dataset_url:
-        raise HTTPException(status_code=400, detail="Either a file or a dataset_url must be provided.")
+        raise HTTPException(
+            status_code=400, detail="Either a file or a dataset_url must be provided."
+        )
 
-    client_dir = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    client_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+    )
     os.makedirs(client_dir, exist_ok=True)
-    
+
     file_path = ""
     if file:
         file_path = os.path.join(client_dir, file.filename)
@@ -255,28 +301,34 @@ async def upload_dataset(
                 shutil.copyfileobj(file.file, buffer)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
-            
+
         logger.info(f"Dataset {file.filename} saved for client {client_id}")
     elif dataset_url:
         parsed_url = urlparse(dataset_url)
         filename = os.path.basename(parsed_url.path) or "downloaded_dataset.csv"
         file_path = os.path.join(client_dir, filename)
-        
+
         try:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            req = urllib.request.Request(dataset_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, context=ctx) as response, open(file_path, 'wb') as out_file:
+            req = urllib.request.Request(
+                dataset_url, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, context=ctx) as response, open(
+                file_path, "wb"
+            ) as out_file:
                 shutil.copyfileobj(response, out_file)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to download from URL: {e}")
-            
+            raise HTTPException(
+                status_code=500, detail=f"Failed to download from URL: {e}"
+            )
+
         logger.info(f"Dataset downloaded from {dataset_url} for client {client_id}")
-    
+
     # Trigger background training
     background_tasks.add_task(train_client_background, client_id, file_path)
-    
+
     return {"message": "Dataset uploaded successfully. Background training started."}
 
 

@@ -32,7 +32,7 @@ export default function ModelsPage() {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const res = await fetch("http://localhost:8000/metrics");
+                const res = await fetch("http://localhost:8000/fl/metrics");
                 if (res.ok) {
                     const json = await res.json();
                     // Build lookup maps by version_id
@@ -44,7 +44,7 @@ export default function ModelsPage() {
                     setAggs(aggMap);
                 }
 
-                const verRes = await fetch("http://localhost:8000/versions");
+                const verRes = await fetch("http://localhost:8000/fl/versions");
                 if (verRes.ok) {
                     const vJson = await verRes.json();
                     setVersions(vJson.data || []);
@@ -61,7 +61,7 @@ export default function ModelsPage() {
     const handleDownload = async (versionId: string) => {
         setDownloading(versionId);
         try {
-            const res = await fetch(`http://localhost:8000/model/download?version_id=${versionId}`);
+            const res = await fetch(`http://localhost:8000/fl/model/download?version_id=${versionId}`);
             if (res.ok) {
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);

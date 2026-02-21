@@ -29,7 +29,7 @@ export function Sidebar() {
     useEffect(() => {
         const fetchTokens = async () => {
             try {
-                const res = await fetch("http://localhost:8000/clients");
+                const res = await fetch("http://localhost:8000/fl/clients");
                 if (res.ok) {
                     const json = await res.json();
                     let total = 50000; // Starting protocol escrow pool
