@@ -4,8 +4,6 @@ import { useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { supabase } from '@/lib/supabaseClient';
-
 export default function LoginPage() {
     const router = useRouter();
     const [loading, setLoading] = useState(false);
@@ -19,19 +17,23 @@ export default function LoginPage() {
         setLoading(true);
 
         try {
-            const { data, error } = await supabase.auth.signInWithPassword({
-                email,
-                password,
+            const res = await fetch("http://localhost:8000/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email, password }),
             });
 
-            if (error) {
-                setError(error.message);
+            const data = await res.json();
+
+            if (!res.ok) {
+                setError(data.detail || "Invalid email or password.");
                 return;
             }
 
-            if (data?.session) {
-                router.push('/dashboard');
-            }
+            // Store user info in localStorage for session persistence
+            localStorage.setItem("user", JSON.stringify(data.user));
+
+            router.push('/dashboard');
         } catch (err: any) {
             setError(err.message || 'An unexpected error occurred.');
         } finally {

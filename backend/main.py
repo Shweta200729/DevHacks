@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import bcrypt
@@ -18,6 +19,14 @@ from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, HTTPException
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class SignupRequest(BaseModel):
@@ -56,7 +65,8 @@ async def signup(request: SignupRequest):
 
         return {"message": "User created successfully", "user": response.data}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Signup error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error saving new user: {str(e)}")
 
 
 @app.post("/api/auth/login")

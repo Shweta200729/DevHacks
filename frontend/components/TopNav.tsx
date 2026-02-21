@@ -1,18 +1,38 @@
 "use client";
 
-import { Bell, Search, User } from "lucide-react";
-import { usePathname } from "next/navigation";
+import { Bell, Search, LogOut } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
 export function TopNav() {
     const pathname = usePathname();
+    const router = useRouter();
+    const [user, setUser] = useState<{ name: string; email: string } | null>(null);
 
-    // Create a pleasant title from the pathname
+    useEffect(() => {
+        try {
+            const stored = localStorage.getItem("user");
+            if (stored) setUser(JSON.parse(stored));
+        } catch { }
+    }, []);
+
+    const handleLogout = () => {
+        localStorage.removeItem("user");
+        router.push("/login");
+    };
+
+    // Derive page title from pathname
     const pathSegments = pathname.split("/").filter(Boolean);
     let title = "Overview";
     if (pathSegments.length > 1) {
         const lastSegment = pathSegments[pathSegments.length - 1];
         title = lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1);
     }
+
+    // Get initials from name
+    const initials = user?.name
+        ? user.name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2)
+        : "?";
 
     return (
         <header className="h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10 shadow-sm">
@@ -39,9 +59,27 @@ export function TopNav() {
                     <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-blue-600 border border-white" />
                 </button>
 
-                <div className="h-8 w-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 border border-blue-300 flex items-center justify-center text-blue-700 font-semibold cursor-pointer shadow-sm">
-                    A
+                {/* User avatar with name tooltip */}
+                <div className="flex items-center gap-2">
+                    <div
+                        title={user?.name || "User"}
+                        className="h-8 w-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 border border-blue-300 flex items-center justify-center text-blue-700 font-semibold cursor-pointer shadow-sm text-xs"
+                    >
+                        {initials}
+                    </div>
+                    {user?.name && (
+                        <span className="hidden lg:block text-sm font-medium text-slate-700">{user.name}</span>
+                    )}
                 </div>
+
+                {/* Logout button */}
+                <button
+                    onClick={handleLogout}
+                    title="Logout"
+                    className="p-2 text-slate-400 hover:text-red-500 transition-colors rounded-full hover:bg-red-50"
+                >
+                    <LogOut className="w-5 h-5" />
+                </button>
             </div>
         </header>
     );

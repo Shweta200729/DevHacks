@@ -2,52 +2,25 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const router = useRouter();
     const [loading, setLoading] = useState(true);
-    const [session, setSession] = useState<any>(null);
+    const [user, setUser] = useState<any>(null);
 
     useEffect(() => {
-        let mounted = true;
-
-        async function checkSession() {
-            try {
-                const { data: { session } } = await supabase.auth.getSession();
-                if (mounted) {
-                    if (!session) {
-                        router.push('/login');
-                    } else {
-                        setSession(session);
-                    }
-                }
-            } catch (err) {
-                console.error("Session check failed", err);
-                if (mounted) router.push('/login');
-            } finally {
-                if (mounted) setLoading(false);
+        try {
+            const stored = localStorage.getItem("user");
+            if (!stored) {
+                router.push("/login");
+            } else {
+                setUser(JSON.parse(stored));
             }
+        } catch {
+            router.push("/login");
+        } finally {
+            setLoading(false);
         }
-
-        checkSession();
-
-        const { data: authListener } = supabase.auth.onAuthStateChange(
-            (event, session) => {
-                if (mounted) {
-                    if (!session) {
-                        router.push('/login');
-                    } else {
-                        setSession(session);
-                    }
-                }
-            }
-        );
-
-        return () => {
-            mounted = false;
-            authListener.subscription.unsubscribe();
-        };
     }, [router]);
 
     if (loading) {
@@ -58,7 +31,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
         );
     }
 
-    if (!session) {
+    if (!user) {
         return null; // Will redirect in useEffect
     }
 
