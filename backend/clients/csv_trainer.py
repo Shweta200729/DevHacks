@@ -39,6 +39,7 @@ if _backend_dir not in sys.path:
 # CSV introspection helpers  (exported for use by server/main.py)
 # ---------------------------------------------------------------------------
 
+
 def _sniff_csv(csv_path: str) -> Tuple[bool, int]:
     """
     Detects whether a CSV has a header and counts the number of feature columns.
@@ -74,7 +75,9 @@ def _sniff_csv(csv_path: str) -> Tuple[bool, int]:
 
     num_features = num_cols - 1  # last column = label
     if num_features < 1:
-        raise ValueError(f"CSV has only {num_cols} column(s). Need at least 2 (features + label).")
+        raise ValueError(
+            f"CSV has only {num_cols} column(s). Need at least 2 (features + label)."
+        )
 
     return has_header, num_features
 
@@ -105,6 +108,7 @@ def _build_label_map(csv_path: str, has_header: bool) -> Dict[str, int]:
 # Universal CSV Dataset
 # ---------------------------------------------------------------------------
 
+
 class UniversalCSVDataset(Dataset):
     """
     Parses ANY CSV file into (feature_tensor, label_int) pairs.
@@ -120,15 +124,15 @@ class UniversalCSVDataset(Dataset):
 
     def __init__(
         self,
-        csv_path:   str,
-        label_map:  Dict[str, int],
+        csv_path: str,
+        label_map: Dict[str, int],
         has_header: bool,
-        max_rows:   int = 100_000,
+        max_rows: int = 100_000,
     ):
         super().__init__()
         self.label_map = label_map
         self.features: List[torch.Tensor] = []
-        self.labels:   List[int]          = []
+        self.labels: List[int] = []
         self._parse(csv_path, has_header, max_rows)
 
     def _parse(self, path: str, has_header: bool, max_rows: int):
@@ -151,7 +155,7 @@ class UniversalCSVDataset(Dataset):
                     if label_str not in self.label_map:
                         skipped += 1
                         continue
-                    
+
                     self.labels.append(self.label_map[label_str])
                     raw_rows.append([v.strip() for v in row[:-1]])
                 except IndexError:
@@ -191,13 +195,13 @@ class UniversalCSVDataset(Dataset):
         # Convert to tensor and normalise per-column
         feat_tensor = torch.tensor(raw_features, dtype=torch.float32)
         mean = feat_tensor.mean(dim=0)
-        std  = feat_tensor.std(dim=0).clamp(min=1e-7)
+        std = feat_tensor.std(dim=0).clamp(min=1e-7)
         feat_tensor = (feat_tensor - mean) / std
 
         # Decide shape: image (1,H,W) or flat (D,)
         num_feat = feat_tensor.size(1)
         side = int(math.isqrt(num_feat))
-        is_image = (side * side == num_feat and side >= 8)
+        is_image = side * side == num_feat and side >= 8
 
         for idx in range(feat_tensor.size(0)):
             row_t = feat_tensor[idx]
@@ -222,14 +226,15 @@ class UniversalCSVDataset(Dataset):
 # Training entry-point
 # ---------------------------------------------------------------------------
 
+
 def train_on_csv(
-    client_id:      str,
-    csv_path:       str,
+    client_id: str,
+    csv_path: str,
     global_weights: dict,
-    epochs:         int   = 3,
-    batch_size:     int   = 64,
-    lr:             float = 0.01,
-    device:         str   = "cpu",
+    epochs: int = 3,
+    batch_size: int = 64,
+    lr: float = 0.01,
+    device: str = "cpu",
 ) -> Optional[str]:
     """
     Universal CSV training pipeline.
@@ -259,6 +264,10 @@ def train_on_csv(
 
     logger.info(f"[CSV Train] Starting for {client_id}, file: {csv_path}")
 
+    if not os.path.isfile(csv_path):
+        logger.error(f"[CSV Train] ❌ File not found: {csv_path}")
+        return None
+
     try:
         # ── Step 1: Detect CSV shape ─────────────────────────────────────
         has_header, num_features = _sniff_csv(csv_path)
@@ -279,12 +288,12 @@ def train_on_csv(
 
         # ── Step 3: Build model matching the data shape ──────────────────
         sample_x, _ = dataset[0]
-        input_shape  = tuple(sample_x.shape)
+        input_shape = tuple(sample_x.shape)
 
         local_model = build_model(
-            input_shape = input_shape,
-            num_classes = num_classes,
-            hidden_dims = cfg.hidden_dims(),
+            input_shape=input_shape,
+            num_classes=num_classes,
+            hidden_dims=cfg.hidden_dims(),
         )
 
         # ── Step 4: Load global weights if they fit ──────────────────────
@@ -307,11 +316,15 @@ def train_on_csv(
         for epoch in range(1, epochs + 1):
             epoch_loss = 0.0
             correct = 0
-            total   = 0
+            total = 0
 
             for data, targets in loader:
-                data    = data.to(device)
-                targets = torch.tensor(targets, dtype=torch.long).to(device) if not isinstance(targets, torch.Tensor) else targets.to(device)
+                data = data.to(device)
+                targets = (
+                    torch.tensor(targets, dtype=torch.long).to(device)
+                    if not isinstance(targets, torch.Tensor)
+                    else targets.to(device)
+                )
 
                 optimizer.zero_grad()
                 outputs = local_model(data)
@@ -322,7 +335,7 @@ def train_on_csv(
                 epoch_loss += loss.item()
                 _, pred = torch.max(outputs, 1)
                 correct += (pred == targets).sum().item()
-                total   += targets.size(0)
+                total += targets.size(0)
 
             acc = correct / max(total, 1)
             logger.info(
@@ -331,10 +344,12 @@ def train_on_csv(
             )
 
         # ── Step 6: Save weights ─────────────────────────────────────────
-        client_dir   = os.path.dirname(csv_path)
+        client_dir = os.path.dirname(csv_path)
         weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
 
-        updated = {k: v.cpu().detach().clone() for k, v in local_model.state_dict().items()}
+        updated = {
+            k: v.cpu().detach().clone() for k, v in local_model.state_dict().items()
+        }
         torch.save(updated, weights_path)
 
         logger.info(f"[CSV Train] ✅ Saved weights → {weights_path}")

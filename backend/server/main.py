@@ -91,23 +91,24 @@ app.add_middleware(
 # Global mutable state  (all writes go through model_lock)
 # ---------------------------------------------------------------------------
 
-global_model:    Optional[FLModel]     = None
-model_lock:      asyncio.Lock          = asyncio.Lock()
-storage:         Optional[SupabaseManager] = None
-val_loader:      Optional[DataLoader]  = None
+global_model: Optional[FLModel] = None
+model_lock: asyncio.Lock = asyncio.Lock()
+storage: Optional[SupabaseManager] = None
+val_loader: Optional[DataLoader] = None
 pending_updates: List[Tuple[str, Dict[str, torch.Tensor]]] = []
 
 # Runtime-mutable config mirror — updated via POST /admin/config
 # Points to the singleton; only the DP/queue fields are hot-swappable.
-runtime_cfg: FLSettings = cfg   # replaced by ConfigUpdate POST
+runtime_cfg: FLSettings = cfg  # replaced by ConfigUpdate POST
 
-current_version_id:  Optional[str] = None
-current_version_num: int            = 0
+current_version_id: Optional[str] = None
+current_version_num: int = 0
 
 
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -134,25 +135,27 @@ async def startup_event():
     if cfg.DATASET_NAME.strip():
         try:
             logger.info(f"Loading dataset '{cfg.DATASET_NAME}' …")
-            ds_result   = load_dataset(cfg)
+            ds_result = load_dataset(cfg)
             input_shape = ds_result["input_shape"]
             num_classes = ds_result["num_classes"]
-            val_loader  = ds_result["val_dataloader"]
+            val_loader = ds_result["val_dataloader"]
         except Exception as exc:
             logger.error(f"Dataset load failed: {exc}.")
             input_shape = None
             num_classes = None
     else:
-        logger.info("DATASET_NAME is empty — skipping auto-download. "
-                     "Model will be built when a client uploads data.")
+        logger.info(
+            "DATASET_NAME is empty — skipping auto-download. "
+            "Model will be built when a client uploads data."
+        )
         input_shape = None
         num_classes = None
 
     if input_shape and num_classes:
         global_model = build_model(
-            input_shape = input_shape,
-            num_classes = num_classes,
-            hidden_dims = cfg.hidden_dims(),
+            input_shape=input_shape,
+            num_classes=num_classes,
+            hidden_dims=cfg.hidden_dims(),
         )
     if global_model:
         logger.info(f"Global model built: {global_model}")
@@ -162,12 +165,18 @@ async def startup_event():
     # ── 4. Restore checkpoint from DB ────────────────────────────────────────
     if storage and global_model:
         latest = storage.get_latest_version()
-        if latest["version_num"] > 0 and latest["file_path"] and os.path.exists(latest["file_path"]):
+        if (
+            latest["version_num"] > 0
+            and latest["file_path"]
+            and os.path.exists(latest["file_path"])
+        ):
             try:
-                ckpt = torch.load(latest["file_path"], weights_only=True, map_location="cpu")
+                ckpt = torch.load(
+                    latest["file_path"], weights_only=True, map_location="cpu"
+                )
                 global_model.set_weights(ckpt)
                 current_version_num = latest["version_num"]
-                current_version_id  = latest["id"]
+                current_version_id = latest["id"]
                 logger.info(f"Restored checkpoint: Version {current_version_num}")
             except Exception as exc:
                 logger.warning(f"Checkpoint load failed ({exc}). Starting fresh.")
@@ -202,6 +211,7 @@ async def _init_fresh_model():
 # ---------------------------------------------------------------------------
 # Core aggregation pipeline
 # ---------------------------------------------------------------------------
+
 
 async def _aggregate_and_update(updates: List[Tuple[str, Dict]]) -> Dict[str, float]:
     """
@@ -259,6 +269,7 @@ async def _run_aggregation_async(batch: List[Tuple]):
 # Core endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.get("/model")
 async def get_global_model():
     """Clients download current global model weights (.pt binary)."""
@@ -279,8 +290,8 @@ async def get_global_model():
 @app.post("/update")
 async def receive_update(
     background_tasks: BackgroundTasks,
-    client_id: str      = Form(...),
-    file:      UploadFile = File(...),
+    client_id: str = Form(...),
+    file: UploadFile = File(...),
 ):
     """
     Receives a client's locally-trained .pt weight file.
@@ -316,7 +327,9 @@ async def receive_update(
     if storage:
         try:
             db_uuid = storage.register_client(client_id)
-            storage.log_client_update(curr_vid, db_uuid, status, norm_val, dist_val, reason)
+            storage.log_client_update(
+                curr_vid, db_uuid, status, norm_val, dist_val, reason
+            )
         except Exception as db_err:
             logger.warning(f"DB log failed for {client_id}: {db_err}")
 
@@ -327,7 +340,9 @@ async def receive_update(
     async with model_lock:
         pending_updates.append((client_id, client_weights))
         q = len(pending_updates)
-        logger.info(f"[Update] ACCEPT [{client_id}] — queue {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}")
+        logger.info(
+            f"[Update] ACCEPT [{client_id}] — queue {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}"
+        )
 
         if q >= runtime_cfg.MIN_AGGREGATE_SIZE:
             batch = list(pending_updates)
@@ -341,6 +356,7 @@ async def receive_update(
 # Dashboard read endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.get("/metrics")
 async def get_metrics():
     """Evaluation + aggregation history for the dashboard."""
@@ -348,17 +364,34 @@ async def get_metrics():
         raise HTTPException(500, "Storage uninitialized.")
     evals = (
         storage.supabase.table("evaluation_metrics")
-        .select("*").order("version_id", desc=True).limit(20).execute()
+        .select("*")
+        .order("version_id", desc=True)
+        .limit(20)
+        .execute()
     )
     aggs = (
         storage.supabase.table("aggregation_logs")
-        .select("*").order("version_id", desc=True).limit(20).execute()
+        .select("*")
+        .order("version_id", desc=True)
+        .limit(20)
+        .execute()
     )
     return {
-        "current_version":    current_version_num,
-        "evaluations":        evals.data,
-        "aggregations":       aggs.data,
+        "current_version": current_version_num,
+        "evaluations": evals.data,
+        "aggregations": aggs.data,
         "pending_queue_size": len(pending_updates),
+    }
+
+
+@app.get("/status")
+async def get_status():
+    """Returns the current status points to fulfill the prompt"""
+    return {
+        "status": "online",
+        "current_version": current_version_num,
+        "dp_enabled": runtime_cfg.DP_ENABLED,
+        "aggregation_method": runtime_cfg.AGGREGATION_METHOD,
     }
 
 
@@ -370,7 +403,10 @@ async def get_clients():
     try:
         rows = (
             storage.supabase.table("client_updates")
-            .select("*").order("created_at", desc=True).limit(50).execute()
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
         )
         return {"data": rows.data}
     except Exception as exc:
@@ -386,7 +422,10 @@ async def get_versions():
     try:
         rows = (
             storage.supabase.table("model_versions")
-            .select("*").order("version_num", desc=True).limit(50).execute()
+            .select("*")
+            .order("version_num", desc=True)
+            .limit(50)
+            .execute()
         )
         return {"data": rows.data}
     except Exception as exc:
@@ -403,7 +442,10 @@ async def download_global_model(version_id: str = None):
         if version_id:
             row = (
                 storage.supabase.table("model_versions")
-                .select("file_path").eq("id", version_id).single().execute()
+                .select("file_path")
+                .eq("id", version_id)
+                .single()
+                .execute()
             )
             file_path = row.data.get("file_path") if row.data else None
         else:
@@ -426,9 +468,10 @@ async def download_global_model(version_id: str = None):
 # Simulation  (demo / testing  — fires a real training loop)
 # ---------------------------------------------------------------------------
 
+
 class SimulationRequest(BaseModel):
-    client_name:          str
-    is_malicious:         bool  = False
+    client_name: str
+    is_malicious: bool = False
     malicious_multiplier: float = cfg.NORM_THRESHOLD * 3
 
 
@@ -441,6 +484,7 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
     """
     if not global_model:
         raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+
     def _worker(name: str, malicious: bool, mult: float, vid):
         import asyncio as _as
         from clients.local_training import get_updated_weights
@@ -459,16 +503,21 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
         local_m.set_weights(gw)
         local_m.train()
 
-        optimizer = torch.optim.SGD(local_m.parameters(),
-                                    lr=cfg.LEARNING_RATE, momentum=0.9)
+        optimizer = torch.optim.SGD(
+            local_m.parameters(), lr=cfg.LEARNING_RATE, momentum=0.9
+        )
         criterion = torch.nn.CrossEntropyLoss()
 
         # Synthetic mini-batches shaped to match the model's input_shape
-        c, *spatial = global_model.input_shape if len(global_model.input_shape) == 3 else (global_model.input_shape[0],)
+        c, *spatial = (
+            global_model.input_shape
+            if len(global_model.input_shape) == 3
+            else (global_model.input_shape[0],)
+        )
         batch_shape = (16, *global_model.input_shape)
 
         for _ in range(5):
-            inputs  = torch.randn(*batch_shape)
+            inputs = torch.randn(*batch_shape)
             targets = torch.randint(0, global_model.num_classes, (16,))
             optimizer.zero_grad()
             loss = criterion(local_m(inputs), targets)
@@ -484,7 +533,9 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
         status, reason, norm_val, dist_val = detect_update(weights, gw, cfg=runtime_cfg)
         if storage:
             try:
-                storage.log_client_update(vid, db_client_id, status, norm_val, dist_val, reason)
+                storage.log_client_update(
+                    vid, db_client_id, status, norm_val, dist_val, reason
+                )
             except Exception:
                 pass
 
@@ -493,8 +544,11 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
         logger.info(f"[Sim] {name} → {status}")
 
     background_tasks.add_task(
-        _worker, req.client_name, req.is_malicious,
-        req.malicious_multiplier, current_version_id,
+        _worker,
+        req.client_name,
+        req.is_malicious,
+        req.malicious_multiplier,
+        current_version_id,
     )
     return {"status": "Simulation started in background."}
 
@@ -518,19 +572,33 @@ async def _enqueue_and_aggregate(client_id: str, weights: Dict[str, torch.Tensor
 # Admin config  (hot-update DP/queue settings without restart)
 # ---------------------------------------------------------------------------
 
+
+class ToggleDPRequest(BaseModel):
+    dp_enabled: bool
+
+
+@app.post("/toggle-dp")
+async def toggle_dp(req: ToggleDPRequest):
+    """Toggle Differential Privacy dynamically."""
+    global runtime_cfg
+    runtime_cfg = runtime_cfg.model_copy(update={"DP_ENABLED": req.dp_enabled})
+    logger.info(f"Differential privacy toggled to: {req.dp_enabled}")
+    return {"status": "ok", "dp_enabled": req.dp_enabled}
+
+
 class ConfigUpdate(BaseModel):
-    dp_enabled:       bool  = False
-    dp_clip_norm:     float = 10.0
-    dp_noise_mult:    float = 1.0
-    min_update_queue: int   = 1
+    dp_enabled: bool = False
+    dp_clip_norm: float = 10.0
+    dp_noise_mult: float = 1.0
+    min_update_queue: int = 1
 
 
 @app.get("/admin/config")
 async def get_config():
     return {
-        "dp_enabled":       runtime_cfg.DP_ENABLED,
-        "dp_clip_norm":     runtime_cfg.DP_CLIP_NORM,
-        "dp_noise_mult":    runtime_cfg.DP_NOISE_MULT,
+        "dp_enabled": runtime_cfg.DP_ENABLED,
+        "dp_clip_norm": runtime_cfg.DP_CLIP_NORM,
+        "dp_noise_mult": runtime_cfg.DP_NOISE_MULT,
         "min_update_queue": runtime_cfg.MIN_AGGREGATE_SIZE,
     }
 
@@ -540,12 +608,14 @@ async def set_config(update: ConfigUpdate):
     """Hot-updates runtime DP & queue settings in memory (no restart needed)."""
     global runtime_cfg
     # Create a patched copy using model_copy (Pydantic v2)
-    runtime_cfg = runtime_cfg.model_copy(update={
-        "DP_ENABLED":       update.dp_enabled,
-        "DP_CLIP_NORM":     update.dp_clip_norm,
-        "DP_NOISE_MULT":    update.dp_noise_mult,
-        "MIN_AGGREGATE_SIZE": update.min_update_queue,
-    })
+    runtime_cfg = runtime_cfg.model_copy(
+        update={
+            "DP_ENABLED": update.dp_enabled,
+            "DP_CLIP_NORM": update.dp_clip_norm,
+            "DP_NOISE_MULT": update.dp_noise_mult,
+            "MIN_AGGREGATE_SIZE": update.min_update_queue,
+        }
+    )
     logger.info(
         f"[Config] Updated: DP={runtime_cfg.DP_ENABLED}, "
         f"clip={runtime_cfg.DP_CLIP_NORM}, σ={runtime_cfg.DP_NOISE_MULT}, "
@@ -558,6 +628,7 @@ async def set_config(update: ConfigUpdate):
 # Dataset upload + per-client weight serving
 # ---------------------------------------------------------------------------
 
+
 def _train_client_background(client_id: str, file_path: str):
     """
     Background task triggered by CSV upload from the frontend.
@@ -568,7 +639,7 @@ def _train_client_background(client_id: str, file_path: str):
       3. Train locally on the uploaded data using real PyTorch.
       4. Submit the trained weights into the aggregation pipeline.
       5. Aggregate → update global model → evaluate → store metrics.
-    
+
     This means: uploading a CSV from the dashboard is enough to
     populate all graphs with real accuracy/loss data. No DATASET_NAME needed.
     """
@@ -577,12 +648,15 @@ def _train_client_background(client_id: str, file_path: str):
     logger.info(f"[BG Train] Starting for {client_id} on {file_path}")
     try:
         from clients.csv_trainer import (
-            _sniff_csv, _build_label_map, UniversalCSVDataset, train_on_csv,
+            _sniff_csv,
+            _build_label_map,
+            UniversalCSVDataset,
+            train_on_csv,
         )
 
         # ── Step 1: Detect CSV shape ─────────────────────────────────────────
         has_header, num_features = _sniff_csv(file_path)
-        label_map   = _build_label_map(file_path, has_header)
+        label_map = _build_label_map(file_path, has_header)
         num_classes = len(label_map)
         logger.info(
             f"[BG Train] CSV detected: features={num_features}, "
@@ -593,24 +667,27 @@ def _train_client_background(client_id: str, file_path: str):
         global global_model, val_loader
         if global_model is None:
             import math
+
             side = int(math.isqrt(num_features))
-            is_image = (side * side == num_features and side >= 8)
+            is_image = side * side == num_features and side >= 8
             input_shape = (1, side, side) if is_image else (num_features,)
 
             new_model = build_model(
-                input_shape = input_shape,
-                num_classes = num_classes,
-                hidden_dims = cfg.hidden_dims(),
+                input_shape=input_shape,
+                num_classes=num_classes,
+                hidden_dims=cfg.hidden_dims(),
             )
             logger.info(f"[BG Train] Built global model from CSV: {new_model}")
 
             # Build a validation loader from 20% of this CSV
             dataset = UniversalCSVDataset(file_path, label_map, has_header)
-            n_val   = max(1, int(len(dataset) * cfg.TEST_SPLIT_RATIO))
+            n_val = max(1, int(len(dataset) * cfg.TEST_SPLIT_RATIO))
             n_train = len(dataset) - n_val
             from torch.utils.data import random_split
+
             _, val_subset = random_split(
-                dataset, [n_train, n_val],
+                dataset,
+                [n_train, n_val],
                 generator=torch.Generator().manual_seed(42),
             )
             new_val_loader = DataLoader(
@@ -619,11 +696,13 @@ def _train_client_background(client_id: str, file_path: str):
 
             # Atomically set the global model + val loader
             loop = _as.new_event_loop()
+
             async def _set_model():
                 async with model_lock:
                     global global_model, val_loader
                     global_model = new_model
-                    val_loader   = new_val_loader
+                    val_loader = new_val_loader
+
             loop.run_until_complete(_set_model())
             loop.close()
             logger.info("[BG Train] Global model + validation loader initialised.")
@@ -639,11 +718,11 @@ def _train_client_background(client_id: str, file_path: str):
 
         # ── Step 4: Train on the CSV ─────────────────────────────────────────
         saved_path = train_on_csv(
-            client_id      = client_id,
-            csv_path       = file_path,
-            global_weights = gw,
-            epochs         = cfg.BG_TRAIN_EPOCHS,
-            device         = cfg.DEVICE,
+            client_id=client_id,
+            csv_path=file_path,
+            global_weights=gw,
+            epochs=cfg.BG_TRAIN_EPOCHS,
+            device=cfg.DEVICE,
         )
 
         if not saved_path:
@@ -660,6 +739,7 @@ def _train_client_background(client_id: str, file_path: str):
         # ── Step 6: Feed into aggregation pipeline ───────────────────────────
         # (detect → accept/reject → aggregate → evaluate → store)
         from server.detection import detect_update as _detect
+
         global_weights = _as.run(_async_get_weights())
 
         status, reason, norm_val, dist_val = _detect(
@@ -670,8 +750,12 @@ def _train_client_background(client_id: str, file_path: str):
             try:
                 db_id = storage.register_client(client_id)
                 storage.log_client_update(
-                    current_version_id or "", db_id,
-                    status, norm_val, dist_val, reason,
+                    current_version_id or "",
+                    db_id,
+                    status,
+                    norm_val,
+                    dist_val,
+                    reason,
                 )
             except Exception:
                 pass
@@ -691,16 +775,16 @@ def _train_client_background(client_id: str, file_path: str):
 @app.post("/api/dataset/upload")
 async def upload_dataset(
     background_tasks: BackgroundTasks,
-    client_id:   str        = Form(...),
-    file:        UploadFile = File(None),
-    dataset_url: str        = Form(None),
+    client_id: str = Form(...),
+    file: UploadFile = File(None),
+    dataset_url: str = Form(None),
 ):
     """Upload a dataset (file or URL) and trigger background local training."""
     if not file and not dataset_url:
         raise HTTPException(400, "Provide file or dataset_url.")
 
     client_dir = os.path.join(
-        os.path.dirname(__file__), "..", "data", f"client_{client_id}"
+        os.path.abspath(os.path.dirname(__file__)), "..", "data", f"client_{client_id}"
     )
     os.makedirs(client_dir, exist_ok=True)
     file_path = ""
@@ -718,15 +802,16 @@ async def upload_dataset(
         logger.info(f"Dataset '{file.filename}' saved for {client_id} (streaming).")
 
     elif dataset_url:
-        parsed    = urlparse(dataset_url)
-        filename  = os.path.basename(parsed.path) or "dataset.csv"
+        parsed = urlparse(dataset_url)
+        filename = os.path.basename(parsed.path) or "dataset.csv"
         file_path = os.path.join(client_dir, filename)
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
+        ctx.verify_mode = ssl.CERT_NONE
         req = urllib.request.Request(dataset_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, context=ctx) as resp, \
-             open(file_path, "wb") as out:
+        with urllib.request.urlopen(req, context=ctx) as resp, open(
+            file_path, "wb"
+        ) as out:
             shutil.copyfileobj(resp, out)
         logger.info(f"Dataset downloaded from {dataset_url} for {client_id}.")
 
@@ -737,7 +822,9 @@ async def upload_dataset(
 @app.get("/api/model/weights/{client_id}")
 async def get_client_weights(client_id: str):
     """Download the locally-trained .pt file for a specific client."""
-    client_dir   = os.path.join(os.path.dirname(__file__), "..", "data", f"client_{client_id}")
+    client_dir = os.path.join(
+        os.path.abspath(os.path.dirname(__file__)), "..", "data", f"client_{client_id}"
+    )
     weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
     if os.path.exists(weights_path):
         return FileResponse(

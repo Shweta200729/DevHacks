@@ -40,7 +40,7 @@ export default function ClientsPage() {
             // Actually, we need to create a dedicated /clients endpoint in main.py for this table.
             // For demo purposes, we will fetch standard metrics to ensure the system is alive
             // and fallback to a mock array if the endpoint isn't built yet, but we WILL build it next.
-            const res = await fetch("http://localhost:8000/clients");
+            const res = await fetch("http://localhost:8000/fl/clients");
             if (res.ok) {
                 const json = await res.json();
                 setClientUpdates(json.data || []);
@@ -53,7 +53,7 @@ export default function ClientsPage() {
     const handleSimulate = async () => {
         setIsSimulating(true);
         try {
-            await fetch("http://localhost:8000/simulate", {
+            await fetch("http://localhost:8000/fl/simulate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -100,17 +100,49 @@ export default function ClientsPage() {
             });
 
             if (res.ok) {
-                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
+                setUploadStatus({ type: "info", msg: "Dataset submitted. Training model on isolated local data..." });
                 if (fileInputRef.current) fileInputRef.current.value = "";
                 setSelectedFile(null);
                 setDatasetUrl("");
+
+                // Poll the weights endpoint until the background task completes
+                const currentClientId = uploadClientId;
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const checkRes = await fetch(`http://localhost:8000/fl/api/model/weights/${currentClientId}`);
+                        if (checkRes.ok) {
+                            clearInterval(pollInterval);
+                            setUploadStatus({ type: "success", msg: "Local training complete! Download initiated." });
+
+                            // Automatically download weights natively
+                            const url = `http://localhost:8000/fl/api/model/weights/${currentClientId}`;
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `weights_${currentClientId}.pt`;
+                            document.body.appendChild(a);
+                            a.click();
+                            a.remove();
+
+                            setIsUploading(false);
+                        }
+                    } catch (e) {
+                        // Suppress polling connection drops
+                    }
+                }, 2000);
+
+                // Timeout switch in case training stalls heavily (> 60s)
+                setTimeout(() => {
+                    clearInterval(pollInterval);
+                    setIsUploading(false);
+                }, 60000);
+
             } else {
                 const data = await res.json();
                 setUploadStatus({ type: "error", msg: data.detail || "Failed to upload dataset." });
+                setIsUploading(false);
             }
         } catch (e) {
             setUploadStatus({ type: "error", msg: "Network error occurred." });
-        } finally {
             setIsUploading(false);
         }
     };
@@ -120,9 +152,10 @@ export default function ClientsPage() {
             setUploadStatus({ type: "error", msg: "Please enter the Client ID to fetch weights." });
             return;
         }
+        setUploadStatus({ type: "info", msg: "Checking weights..." });
 
         try {
-            setUploadStatus({ type: "info", msg: "Checking weights..." });
+            // First do a lightweight check to ensure the file exists and get the backend error if it doesn't
             const res = await fetch(`http://localhost:8000/fl/api/model/weights/${uploadClientId}`);
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
@@ -133,18 +166,16 @@ export default function ClientsPage() {
                 return;
             }
 
-            // If ok, trigger file download natively
-            const blob = await res.blob();
-            const url = window.URL.createObjectURL(blob);
+            // If ok, use native browser fetching to bypass fetch stream issues
+            const url = `http://localhost:8000/fl/api/model/weights/${uploadClientId}`;
             const a = document.createElement("a");
             a.href = url;
             a.download = `weights_${uploadClientId}.pt`;
             document.body.appendChild(a);
             a.click();
             a.remove();
-            window.URL.revokeObjectURL(url);
 
-            setUploadStatus({ type: "success", msg: "Weights downloaded successfully!" });
+            setTimeout(() => setUploadStatus({ type: "success", msg: "Weights downloaded successfully!" }), 1000);
         } catch (e) {
             setUploadStatus({ type: "error", msg: "Network error occurred." });
         }
@@ -209,6 +240,89 @@ export default function ClientsPage() {
                             <PlayCircle className={`w-5 h-5 ${isSimulating ? 'animate-spin' : ''}`} />
                             {isSimulating ? 'Simulating...' : isMalicious ? 'Fire Malicious Payload' : 'Fire Normal Update'}
                         </button>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* Dataset Upload & Weights Download */}
+            <Card className="bg-white border-slate-200 shadow-sm relative overflow-hidden">
+                <CardHeader>
+                    <CardTitle className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                        <Cpu className="w-5 h-5 text-blue-500" />
+                        Client Decentralized Training
+                    </CardTitle>
+                    <p className="text-slate-500 text-sm max-w-3xl mt-1">
+                        Upload your personal structured dataset securely. The server will spin up a decentralized training worker in the background exclusively containing your local data. Once training is complete, fetch your isolated locally-trained weights (.pt).
+                    </p>
+                </CardHeader>
+                <CardContent>
+                    <div className="flex flex-col gap-6">
+                        <div className="flex flex-col md:flex-row gap-4">
+                            <div className="flex flex-col gap-2 flex-1">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Target Client ID</label>
+                                <input
+                                    className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 w-full placeholder:text-slate-400 transition-all text-sm"
+                                    value={uploadClientId}
+                                    onChange={(e) => setUploadClientId(e.target.value)}
+                                    placeholder="e.g. MyEdgeNode-1"
+                                />
+                            </div>
+                            <div className="flex flex-col gap-2 flex-1 relative">
+                                <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">CSV Dataset URL (Optional)</label>
+                                <input
+                                    className="bg-slate-50 border border-slate-200 text-slate-900 px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 w-full placeholder:text-slate-400 transition-all text-sm"
+                                    value={datasetUrl}
+                                    onChange={(e) => setDatasetUrl(e.target.value)}
+                                    placeholder="https://example.com/dataset.csv"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-4">
+                            <input
+                                type="file"
+                                accept=".csv"
+                                onChange={handleFileChange}
+                                className="hidden"
+                                ref={fileInputRef}
+                            />
+                            <button
+                                onClick={() => fileInputRef.current?.click()}
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-5 py-2.5 rounded-lg font-medium transition-colors border border-slate-200 text-sm shadow-sm"
+                            >
+                                {selectedFile ? selectedFile.name : "Select Local CSV"}
+                            </button>
+
+                            <button
+                                onClick={handleDatasetUpload}
+                                disabled={isUploading}
+                                className={`transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm text-sm ${isUploading ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20'
+                                    }`}
+                            >
+                                {isUploading ? "Uploading..." : "Upload & Train"}
+                            </button>
+
+                            <div className="h-8 w-px bg-slate-200 mx-2" />
+
+                            <button
+                                onClick={handleFetchWeights}
+                                className="transition-all px-6 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-sm text-sm bg-slate-800 hover:bg-slate-900 text-white shadow-slate-800/20"
+                            >
+                                Fetch Weights
+                            </button>
+                        </div>
+
+                        {uploadStatus && (
+                            <div className={`text-sm font-medium px-4 py-3 rounded-lg flex items-center gap-2 ${uploadStatus.type === "error" ? "bg-red-50 text-red-700 border border-red-200" :
+                                uploadStatus.type === "success" ? "bg-green-50 text-green-700 border border-green-200" :
+                                    "bg-blue-50 text-blue-700 border border-blue-200"
+                                }`}>
+                                {uploadStatus.type === "error" && <AlertTriangle className="w-4 h-4" />}
+                                {uploadStatus.type === "success" && <CopyCheck className="w-4 h-4" />}
+                                {uploadStatus.type === "info" && <Cpu className="w-4 h-4 animate-pulse" />}
+                                {uploadStatus.msg}
+                            </div>
+                        )}
                     </div>
                 </CardContent>
             </Card>
