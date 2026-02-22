@@ -238,23 +238,20 @@ export default function ClientsPage() {
                                     <span className="text-xs text-emerald-400 mt-0.5 truncate">📎 {trainFile.name}</span>
                                 )}
 
-                                {/* Epoch slider */}
+                                {/* Epoch input */}
                                 <div className="mt-2 flex flex-col gap-1">
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-xs text-emerald-300">Training Epochs</span>
-                                        <span className="text-sm font-bold text-emerald-100 tabular-nums w-5 text-right">{trainEpochs}</span>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-emerald-400 font-bold uppercase tracking-widest">Training Epochs</span>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={100000}
+                                            value={trainEpochs}
+                                            onChange={(e) => setTrainEpochs(Number(e.target.value))}
+                                            className="bg-emerald-900/40 border border-emerald-700/40 text-white px-3 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-400 font-mono text-sm transition-all w-32"
+                                        />
                                     </div>
-                                    <input
-                                        type="range"
-                                        min={1}
-                                        max={10}
-                                        value={trainEpochs}
-                                        onChange={(e) => setTrainEpochs(Number(e.target.value))}
-                                        className="w-full h-1.5 appearance-none rounded-full bg-emerald-900 accent-emerald-400 cursor-pointer"
-                                    />
-                                    <div className="flex justify-between text-[10px] text-emerald-700 font-mono">
-                                        <span>1 (fast)</span><span>5</span><span>10 (thorough)</span>
-                                    </div>
+                                    <div className="text-[10px] text-emerald-700 font-mono">Min 1, max 100,000</div>
                                 </div>
                             </div>
 

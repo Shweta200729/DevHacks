@@ -1746,7 +1746,7 @@ def _train_client_background(client_id: str, file_path: str, epochs: int = None,
              return
 
         # ── Step 4: Train on the CSV ─────────────────────────────────────────
-        _epochs = max(1, min(int(epochs), 20)) if epochs else cfg.BG_TRAIN_EPOCHS
+        _epochs = max(1, min(int(epochs), 100000)) if epochs else cfg.BG_TRAIN_EPOCHS
         saved_path, epoch_metrics = train_on_csv(
             client_id=client_id,
             csv_path=file_path,
@@ -1873,14 +1873,14 @@ async def upload_dataset(
     version_id: str = Form(None),
 ):
     """Upload a dataset (file or URL) and trigger background local training.
-    Optional `epochs` form field (1-20) overrides the default BG_TRAIN_EPOCHS.
+    Optional `epochs` form field (1-100000) overrides the default BG_TRAIN_EPOCHS.
     Optional `version_id` specifies which model version to fine-tune from.
     """
     if not file and not dataset_url:
         raise HTTPException(400, "Provide file or dataset_url.")
 
     # Clamp epochs to safe range
-    safe_epochs = max(1, min(int(epochs), 20)) if epochs else cfg.BG_TRAIN_EPOCHS
+    safe_epochs = max(1, min(int(epochs), 100000)) if epochs else cfg.BG_TRAIN_EPOCHS
 
     client_dir = os.path.join(
         os.path.abspath(os.path.dirname(__file__)), "..", "data", f"client_{client_id}"
