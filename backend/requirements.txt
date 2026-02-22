@@ -10,3 +10,6 @@ bcrypt
 python-multipart
 pytest
 pytest-asyncio
+web3>=6.0.0
+eth-tester[py-evm]
+pycryptodome

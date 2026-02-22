@@ -56,9 +56,19 @@ from models.model_factory import build_model, FLModel
 from data.dataset_loader import load_dataset
 
 # ── Server-side ML modules ────────────────────────────────────────────────────
+from server.storage import SupabaseManager
 from server.detection import detect_update
 from server.aggregator import aggregate
-from server.storage import SupabaseManager
+
+
+# ── Import Blockchain Rules ────────────────────────────────────────────────
+from server.blockchain import (
+    get_or_create_wallet,
+    reward_client,
+    slash_client,
+    get_all_status,
+    get_recent_transactions,
+)
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 from experiments.evaluation import evaluate_model
@@ -473,9 +483,16 @@ async def receive_update(
     # Always log in-memory (Supabase is secondary)
     _mem_log_client_update(client_id, status, norm_val, dist_val, reason, version_id=curr_vid)
 
+    # Register/Stake in the blockchain economy
+    get_or_create_wallet(client_id)
+
     if status == "REJECT":
+        slash_client(client_id)
         logger.warning(f"[Update] REJECT [{client_id}]: {reason}")
         return {"status": "REJECT", "reason": reason}
+
+    # Reward successful updates
+    reward_client(client_id)
 
     async with model_lock:
         pending_updates.append((client_id, client_weights))
@@ -781,6 +798,15 @@ async def get_config():
         "min_update_queue": runtime_cfg.MIN_AGGREGATE_SIZE,
     }
 
+
+
+@app.get("/blockchain/status")
+async def get_blockchain_economy_status():
+    """Live web3 economy stats for real-time dashboard UI."""
+    return {
+        "wallets": get_all_status(),
+        "recent_transactions": get_recent_transactions()
+    }
 
 @app.post("/admin/config")
 async def set_config(update: ConfigUpdate):
