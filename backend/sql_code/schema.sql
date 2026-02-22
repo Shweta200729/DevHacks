@@ -1,81 +1,92 @@
+-- ============================================================
 -- Full Backend Supabase Database Schema
--- Includes Web Application Users and Federated Learning Orchestration Models
+-- Federated Learning Dashboard + Auth
+-- ============================================================
 
--- 1. Create extension for UUID generation (if using UUIDs)
+-- UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- ----------------------------------------------------
--- A. User Authentication (Dashboard Application)
--- ----------------------------------------------------
+-- ─────────────────────────────────────────────────────────────
+-- A. User Authentication
+-- ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    phone VARCHAR(15) NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    id          SERIAL PRIMARY KEY,
+    name        VARCHAR(100)        NOT NULL,
+    email       VARCHAR(255)        NOT NULL UNIQUE,
+    phone       VARCHAR(15)         NOT NULL,
+    password_hash VARCHAR(255)      NOT NULL,
+    created_at  TIMESTAMPTZ         DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ         DEFAULT NOW()
 );
 
--- ----------------------------------------------------
--- B. Federated Learning Actors & Artifacts
--- ----------------------------------------------------
+-- ─────────────────────────────────────────────────────────────
+-- B. Federated Learning Actors
+-- ─────────────────────────────────────────────────────────────
 
--- Step 1: Federated Learning Clients Table
--- Using TEXT to allow custom client IDs sent from edge devices or Python simulation scripts
+-- Clients (edge nodes)
 CREATE TABLE IF NOT EXISTS clients (
-    id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::TEXT,
+    id          TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::TEXT,
     client_name TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Step 2: Global Model Versions Tracking
+-- Global model checkpoints
+-- file_path is nullable: version 0 seed row has no file yet
 CREATE TABLE IF NOT EXISTS model_versions (
-    id SERIAL PRIMARY KEY,
-    version_num INT UNIQUE NOT NULL,
-    file_path TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    id          SERIAL PRIMARY KEY,
+    version_num INT     UNIQUE NOT NULL,
+    file_path   TEXT,                              -- nullable → no file for seed row
+    created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ----------------------------------------------------
--- C. Federated Learning Aggregation Logs
--- ----------------------------------------------------
+-- ─────────────────────────────────────────────────────────────
+-- C. Federated Learning Logs
+-- ─────────────────────────────────────────────────────────────
 
--- Step 3: Logging Individual Client Model Updates
+-- Per-client update attempts
 CREATE TABLE IF NOT EXISTS client_updates (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    version_id INT REFERENCES model_versions(id) ON DELETE CASCADE,
-    client_id TEXT REFERENCES clients(id) ON DELETE CASCADE,
-    status TEXT NOT NULL CHECK (status IN ('ACCEPT', 'REJECT')),
-    norm_value NUMERIC,
+    id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    version_id     INT  REFERENCES model_versions(id) ON DELETE CASCADE,
+    client_id      TEXT REFERENCES clients(id)        ON DELETE CASCADE,
+    status         TEXT NOT NULL CHECK (status IN ('ACCEPT', 'REJECT')),
+    norm_value     NUMERIC,
     distance_value NUMERIC,
-    reason TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    reason         TEXT,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Step 4: Tracking Global Evaluation Metrics
+-- Evaluation metrics after each aggregation round
+-- loss / accuracy are NULLABLE so the server can store partial results
+-- when evaluation is skipped (val_loader not yet available).
 CREATE TABLE IF NOT EXISTS evaluation_metrics (
-    id SERIAL PRIMARY KEY,
-    version_id INT REFERENCES model_versions(id) ON DELETE CASCADE,
-    loss NUMERIC NOT NULL,
-    accuracy NUMERIC NOT NULL,
-    evaluated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    id          SERIAL  PRIMARY KEY,
+    version_id  INT     REFERENCES model_versions(id) ON DELETE CASCADE,
+    loss        NUMERIC,                           -- nullable (may be NaN → stored as NULL)
+    accuracy    NUMERIC,                           -- nullable
+    created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Step 5: Master Aggregation Execution Logs
+-- Aggregation round summaries
 CREATE TABLE IF NOT EXISTS aggregation_logs (
-    id SERIAL PRIMARY KEY,
-    version_id INT REFERENCES model_versions(id) ON DELETE CASCADE,
-    total_accepted INT,
-    total_rejected INT,
-    method TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    id              SERIAL  PRIMARY KEY,
+    version_id      INT     REFERENCES model_versions(id) ON DELETE CASCADE,
+    total_accepted  INT,
+    total_rejected  INT,
+    method          TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ----------------------------------------------------
--- D. Initial Data Seeding
--- ----------------------------------------------------
--- Insert a baseline model to kick off Round 0
-INSERT INTO model_versions (version_num, file_path) 
-VALUES (0, 'models/global_model_round_0.pt')
+-- ─────────────────────────────────────────────────────────────
+-- D. Indexes for dashboard query performance
+-- ─────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_eval_version   ON evaluation_metrics (version_id DESC);
+CREATE INDEX IF NOT EXISTS idx_agg_version    ON aggregation_logs   (version_id DESC);
+CREATE INDEX IF NOT EXISTS idx_cu_version     ON client_updates     (version_id DESC);
+CREATE INDEX IF NOT EXISTS idx_cu_created     ON client_updates     (created_at  DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- E. Seed: baseline model version so Round 0 exists
+-- ─────────────────────────────────────────────────────────────
+INSERT INTO model_versions (version_num, file_path)
+VALUES (0, NULL)
 ON CONFLICT (version_num) DO NOTHING;

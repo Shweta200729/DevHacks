@@ -108,14 +108,14 @@ export default function ModelsPage() {
                                                 {ag ? `${ag.total_accepted} / ${ag.total_rejected}` : "—"}
                                             </td>
                                             <td className="px-6 py-4 text-center">
-                                                {ev ? (
+                                                {ev?.accuracy != null ? (
                                                     <span className="inline-flex items-center justify-center bg-green-50 text-green-700 px-2 py-1 rounded text-xs font-bold border border-green-200">
                                                         {(ev.accuracy * 100).toFixed(2)}%
                                                     </span>
                                                 ) : "—"}
                                             </td>
                                             <td className="px-6 py-4 text-center font-mono text-slate-500 text-xs">
-                                                {ev ? ev.loss.toFixed(4) : "—"}
+                                                {ev?.loss != null ? ev.loss.toFixed(4) : "—"}
                                             </td>
                                             <td className="px-6 py-4 text-right text-slate-400 text-xs">
                                                 {new Date(v.created_at).toLocaleString()}

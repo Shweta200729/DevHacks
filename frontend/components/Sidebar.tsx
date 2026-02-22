@@ -27,7 +27,7 @@ export function Sidebar() {
     useEffect(() => {
         const fetchTokens = async () => {
             try {
-                const res = await fetch("http://localhost:8000/clients");
+                const res = await fetch("http://localhost:8000/fl/clients");
                 if (res.ok) {
                     const json = await res.json();
                     let total = 50000; // Starting protocol escrow pool
@@ -84,10 +84,10 @@ export function Sidebar() {
             <div className="mt-auto p-4 m-4 rounded-xl bg-slate-50 border border-slate-200 relative overflow-hidden flex flex-col gap-2 shadow-sm">
                 <div className="absolute inset-0 bg-indigo-500/5 blur-2xl rounded-full" />
 
-                <p className="text-xs font-semibold text-slate-500 relative z-10 flex items-center justify-between">
-                    Smart Contract Escrow
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
-                </p>
+                <div className="flex items-center justify-between relative z-10">
+                    <span className="text-xs font-semibold text-slate-500">Smart Contract Escrow</span>
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)] inline-block" />
+                </div>
 
                 <div className="flex items-baseline gap-1 relative z-10">
                     <span className="text-2xl font-black text-slate-900 tracking-tight">

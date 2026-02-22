@@ -49,7 +49,9 @@ def fedavg(updates: List[WeightsDict]) -> WeightsDict:
     for key in updates[0].keys():
         tensors = [u[key].cpu() for u in updates if key in u]
         if tensors:
-            aggregated[key] = torch.stack(tensors).mean(dim=0)
+            orig_dtype = tensors[0].dtype
+            stacked = torch.stack([t.float() for t in tensors])
+            aggregated[key] = stacked.mean(dim=0).to(orig_dtype)
 
     logger.debug(f"[FedAvg] Aggregated {len(updates)} updates.")
     return aggregated
@@ -107,10 +109,11 @@ def trimmed_mean(
         tensors = [u[key].cpu() for u in updates if key in u]
         if not tensors:
             continue
-        stacked = torch.stack(tensors)          # (n, *shape)
+        orig_dtype = tensors[0].dtype
+        stacked = torch.stack([t.float() for t in tensors])   # (n, *shape)
         sorted_, _ = torch.sort(stacked, dim=0)
         sliced = sorted_[trim_count: n - trim_count]
-        aggregated[key] = sliced.mean(dim=0)
+        aggregated[key] = sliced.mean(dim=0).to(orig_dtype)
 
     logger.debug(
         f"[TrimmedMean] Aggregated {n} updates, "
@@ -170,7 +173,9 @@ def add_gaussian_noise(
     noisy: WeightsDict = {}
     with torch.no_grad():
         for key, tensor in aggregated.items():
-            noisy[key] = tensor + torch.randn_like(tensor) * sigma
+            # Noise is always added in float space; cast back to original dtype
+            orig_dtype = tensor.dtype
+            noisy[key] = (tensor.float() + torch.randn_like(tensor.float()) * sigma).to(orig_dtype)
     logger.debug(f"[DP] Gaussian noise added with σ={sigma:.6f}.")
     return noisy
 

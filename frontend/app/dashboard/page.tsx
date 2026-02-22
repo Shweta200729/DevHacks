@@ -29,6 +29,10 @@ export default function OverviewPage() {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+    const [isTraining, setIsTraining] = useState(false);
+    const [chartFlash, setChartFlash] = useState(false);
+    const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const prevEvalCountRef = useRef<number>(0);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const loadMetrics = async () => {
@@ -47,11 +51,35 @@ export default function OverviewPage() {
         }
     };
 
+    // ── Polling logic ───────────────────────────────────────────────────────
+    const startPolling = (intervalMs: number, durationMs?: number) => {
+        if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = setInterval(loadMetrics, intervalMs);
+        if (durationMs) {
+            setTimeout(() => {
+                if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = setInterval(loadMetrics, 3000);
+            }, durationMs);
+        }
+    };
+
     useEffect(() => {
         loadMetrics();
-        const interval = setInterval(loadMetrics, 3000);
-        return () => clearInterval(interval);
+        startPolling(3000);
+        return () => { if (pollIntervalRef.current) clearInterval(pollIntervalRef.current); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Detect when new evaluation data arrives after a training run
+    useEffect(() => {
+        const currentCount = data?.evaluations?.length ?? 0;
+        if (isTraining && currentCount > prevEvalCountRef.current) {
+            setIsTraining(false);
+            setChartFlash(true);
+            setTimeout(() => setChartFlash(false), 2000);
+        }
+        prevEvalCountRef.current = currentCount;
+    }, [data, isTraining]);
 
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -81,7 +109,11 @@ export default function OverviewPage() {
             });
 
             if (res.ok) {
-                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started." });
+                setUploadStatus({ type: "success", msg: "Dataset uploaded! Background training started — charts will update shortly." });
+                setIsTraining(true);
+                prevEvalCountRef.current = data?.evaluations?.length ?? 0;
+                // Fast-poll every 1s for 45s so charts update as soon as training finishes
+                startPolling(1000, 45000);
                 if (fileInputRef.current) fileInputRef.current.value = "";
                 setSelectedFile(null);
                 setDatasetUrl("");
@@ -143,23 +175,27 @@ export default function OverviewPage() {
     const prevEval = data?.evaluations?.length && data.evaluations.length > 1 ? data.evaluations[data.evaluations.length - 2] : null;
     const latestAgg = data?.aggregations?.length ? data.aggregations[data.aggregations.length - 1] : null;
 
-    const accDelta = latestEval && prevEval ? ((latestEval.accuracy - prevEval.accuracy) * 100) : null;
-    const lossDelta = latestEval && prevEval ? (latestEval.loss - prevEval.loss) : null;
+    const accDelta = latestEval?.accuracy != null && prevEval?.accuracy != null
+        ? ((latestEval.accuracy - prevEval.accuracy) * 100) : null;
+    const lossDelta = latestEval?.loss != null && prevEval?.loss != null
+        ? (latestEval.loss - prevEval.loss) : null;
 
     const kpis = [
         { title: "Model Version", value: `v${data?.current_version || 0}`, icon: Network, trend: "Live Synced" },
         { title: "Aggregation Method", value: latestAgg?.method || "—", icon: Cpu, trend: "DP layer active" },
         { title: "Accepted Updates", value: stats.acc.toString(), icon: Activity, trend: `Queue: ${data?.pending_queue_size || 0} pending` },
         { title: "Blocked / Rejected", value: stats.rej.toString(), icon: ShieldCheck, trend: "Byzantine payloads blocked", highlight: true },
-        { title: "Latest Accuracy", value: latestEval ? `${(latestEval.accuracy * 100).toFixed(2)}%` : "N/A", icon: CopyCheck, trend: accDelta !== null ? `${accDelta >= 0 ? "↑" : "↓"} ${Math.abs(accDelta).toFixed(2)}% this round` : "Awaiting data", highlightKey: true },
+        { title: "Latest Accuracy", value: latestEval?.accuracy != null ? `${(latestEval.accuracy * 100).toFixed(2)}%` : "N/A", icon: CopyCheck, trend: accDelta !== null ? `${accDelta >= 0 ? "↑" : "↓"} ${Math.abs(accDelta).toFixed(2)}% this round` : "Awaiting data", highlightKey: true },
     ];
 
     // Combined chart: loss + accuracy on dual axes
-    const combinedChartData = (data?.evaluations ?? []).map(e => ({
-        version: `v${e.version_id}`,
-        accuracy: parseFloat((e.accuracy * 100).toFixed(2)),
-        loss: parseFloat(e.loss.toFixed(4)),
-    }));
+    const combinedChartData = (data?.evaluations ?? [])
+        .filter(e => e.accuracy != null || e.loss != null)
+        .map(e => ({
+            version: `v${e.version_id}`,
+            accuracy: e.accuracy != null ? parseFloat((e.accuracy * 100).toFixed(2)) : null,
+            loss: e.loss != null ? parseFloat((e.loss).toFixed(4)) : null,
+        }));
 
     // Client acceptance rate per round
     const acceptanceData = (data?.aggregations ?? []).map(a => ({
@@ -365,11 +401,17 @@ export default function OverviewPage() {
                         </div>
 
                         {uploadStatus && (
-                            <div className={`p-4 rounded-lg text-sm font-medium border ${uploadStatus.type === "success" ? "bg-green-50 text-green-700 border-green-200" :
+                            <div className={`p-4 rounded-lg text-sm font-medium border flex items-center gap-3 ${uploadStatus.type === "success" ? "bg-green-50 text-green-700 border-green-200" :
                                 uploadStatus.type === "error" ? "bg-red-50 text-red-700 border-red-200" :
                                     "bg-blue-50 text-blue-700 border-blue-200"
                                 }`}>
-                                {uploadStatus.msg}
+                                {isTraining && (
+                                    <svg className="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                    </svg>
+                                )}
+                                <span>{isTraining ? "Training in progress… Charts will update automatically." : uploadStatus.msg}</span>
                             </div>
                         )}
                     </div>
@@ -411,7 +453,8 @@ export default function OverviewPage() {
                     <p className="text-sm text-slate-400 mt-0.5">Blue = Accuracy (left axis) · Red = Training Loss (right axis)</p>
                 </CardHeader>
                 <CardContent>
-                    <div className="h-72 w-full rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                    <div className={`h-72 w-full rounded-xl border-2 bg-slate-50/50 p-2 transition-all duration-700 ${chartFlash ? "border-indigo-400 shadow-lg shadow-indigo-100" : "border-slate-100"
+                        }`}>
                         {combinedChartData.length > 0 ? (
                             <ResponsiveContainer width="100%" height="100%">
                                 <ComposedChart data={combinedChartData}>

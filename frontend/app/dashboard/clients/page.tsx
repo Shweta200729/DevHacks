@@ -16,23 +16,32 @@ export default function ClientsPage() {
     const [simName, setSimName] = useState("");
     const [isMalicious, setIsMalicious] = useState(false);
     const [isSimulating, setIsSimulating] = useState(false);
+    const [simMessage, setSimMessage] = useState<{ type: "ok" | "err" | "info"; msg: string } | null>(null);
     const [clientUpdates, setClientUpdates] = useState<ClientUpdate[]>([]);
+    const [loading, setLoading] = useState(true);
+    const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
-    // Auto-generate realistic client ID on load
     useEffect(() => {
         setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
         fetchClientUpdates();
-        const interval = setInterval(fetchClientUpdates, 3000);
-        return () => clearInterval(interval);
+        startPolling(3000);
+        return () => { if (pollRef.current) clearInterval(pollRef.current); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    const startPolling = (ms: number, durationMs?: number) => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        pollRef.current = setInterval(fetchClientUpdates, ms);
+        if (durationMs) {
+            setTimeout(() => {
+                if (pollRef.current) clearInterval(pollRef.current);
+                pollRef.current = setInterval(fetchClientUpdates, 3000);
+            }, durationMs);
+        }
+    };
 
     const fetchClientUpdates = async () => {
         try {
-            // Need a new backend route or we can derive from existing. 
-            // For now, let's fetch /metrics and if we add a dedicated endpoint later, we can swap.
-            // Actually, we need to create a dedicated /clients endpoint in main.py for this table.
-            // For demo purposes, we will fetch standard metrics to ensure the system is alive
-            // and fallback to a mock array if the endpoint isn't built yet, but we WILL build it next.
             const res = await fetch("http://localhost:8000/fl/clients");
             if (res.ok) {
                 const json = await res.json();
@@ -40,13 +49,16 @@ export default function ClientsPage() {
             }
         } catch (e) {
             console.error("Failed fetching clients", e);
+        } finally {
+            setLoading(false);
         }
     };
 
     const handleSimulate = async () => {
         setIsSimulating(true);
+        setSimMessage({ type: "info", msg: "Firing simulation..." });
         try {
-            await fetch("http://localhost:8000/fl/simulate", {
+            const res = await fetch("http://localhost:8000/fl/simulate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -55,10 +67,19 @@ export default function ClientsPage() {
                     malicious_multiplier: 50.0,
                 }),
             });
-            setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
-            setTimeout(fetchClientUpdates, 1500);
+            if (res.ok) {
+                setSimMessage({ type: "ok", msg: "Simulation started! Client data will appear below shortly." });
+                setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+                // Fast poll for 20s so the row appears as soon as the worker finishes
+                startPolling(1000, 20000);
+            } else if (res.status === 503) {
+                setSimMessage({ type: "err", msg: "No model loaded yet — upload a CSV dataset on the Overview page first, then simulate." });
+            } else {
+                const j = await res.json().catch(() => ({}));
+                setSimMessage({ type: "err", msg: j.detail || "Simulation request failed." });
+            }
         } catch (e) {
-            alert("Simulation request failed to reach server.");
+            setSimMessage({ type: "err", msg: "Network error — is the backend running on port 8000?" });
         } finally {
             setIsSimulating(false);
         }
@@ -124,13 +145,33 @@ export default function ClientsPage() {
                             {isSimulating ? 'Simulating...' : isMalicious ? 'Fire Malicious Payload' : 'Fire Normal Update'}
                         </button>
                     </div>
+
+                    {simMessage && (
+                        <div className={`mt-4 px-4 py-3 rounded-lg text-sm font-medium border flex items-center gap-2 ${simMessage.type === "ok" ? "bg-green-950/40 text-green-300 border-green-800/40" :
+                                simMessage.type === "err" ? "bg-red-950/40 text-red-300 border-red-800/40" :
+                                    "bg-indigo-950/40 text-indigo-300 border-indigo-800/40"
+                            }`}>
+                            {simMessage.type === "info" && (
+                                <svg className="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                </svg>
+                            )}
+                            {simMessage.msg}
+                        </div>
+                    )}
                 </CardContent>
             </Card>
 
             {/* Clients Table */}
             <Card className="bg-white border-slate-200 shadow-sm">
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between">
                     <CardTitle className="text-lg font-bold text-slate-900">Live Client Update Stream</CardTitle>
+                    {clientUpdates.length > 0 && (
+                        <span className="text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-full">
+                            {clientUpdates.length} update{clientUpdates.length !== 1 ? "s" : ""}
+                        </span>
+                    )}
                 </CardHeader>
                 <CardContent>
                     <div className="w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-50/50">

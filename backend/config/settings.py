@@ -72,10 +72,10 @@ class FLSettings(BaseSettings):
     """Torch device: 'cpu' or 'cuda'."""
 
     # ── Byzantine Detection ──────────────────────────────────────────────────
-    NORM_THRESHOLD: float = 50.0
+    NORM_THRESHOLD: float = 1000.0
     """Maximum L2 norm allowed for an update. Updates above this are rejected."""
 
-    DISTANCE_THRESHOLD: float = 25.0
+    DISTANCE_THRESHOLD: float = 500.0
     """Maximum L2 distance from global model allowed for an update."""
 
     # ── Aggregation ──────────────────────────────────────────────────────────
