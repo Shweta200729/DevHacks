@@ -312,6 +312,19 @@ async def init_fl_state() -> None:
             num_classes=num_classes,
             hidden_dims=cfg.hidden_dims(),
         )
+
+    # ── Fallback: always build a default MNIST model so simulation works ──
+    if global_model is None:
+        logger.info(
+            "Building default MNIST-shaped model (1,28,28) / 10 classes "
+            "as fallback so simulations work immediately."
+        )
+        global_model = build_model(
+            input_shape=(1, 28, 28),
+            num_classes=10,
+            hidden_dims=cfg.hidden_dims(),
+        )
+
     if global_model:
         logger.info(f"Global model built: {global_model}")
     else:
@@ -326,9 +339,13 @@ async def init_fl_state() -> None:
                 global_model.set_weights(ckpt)
                 current_version_num = latest["version_num"]
                 current_version_id = latest["id"]
-                logger.info(f"Restored checkpoint from Supabase: Version {current_version_num}")
+                logger.info(
+                    f"Restored checkpoint from Supabase: Version {current_version_num}"
+                )
             except Exception as exc:
-                logger.warning(f"Checkpoint load from Supabase failed ({exc}). Starting fresh.")
+                logger.warning(
+                    f"Checkpoint load from Supabase failed ({exc}). Starting fresh."
+                )
                 await _init_fresh_model()
         else:
             await _init_fresh_model()
@@ -615,6 +632,7 @@ async def _run_aggregation_collab_async(batch: List[Tuple], session_id: str):
 
             # Update the specific collaboration session pointer
             import datetime as _dt
+
             storage.supabase.table("collab_sessions").update(
                 {
                     "shared_version_id": new_v_id,
@@ -1148,14 +1166,19 @@ async def download_global_model(version_id: str = None):
             storage.supabase.storage.from_("fl-models").upload(
                 path=bucket_key,
                 file=raw_bytes,
-                file_options={"content-type": "application/octet-stream", "upsert": "true"},
+                file_options={
+                    "content-type": "application/octet-stream",
+                    "upsert": "true",
+                },
             )
             storage.supabase.table("model_versions").update(
                 {"file_path": bucket_key}
             ).eq("id", row_id).execute()
             logger.info(f"[Download] Migrated '{raw_path}' → bucket key '{bucket_key}'")
         except Exception as up_exc:
-            logger.warning(f"[Download] On-the-fly bucket upload failed ({up_exc}); serving from disk.")
+            logger.warning(
+                f"[Download] On-the-fly bucket upload failed ({up_exc}); serving from disk."
+            )
         buf = io.BytesIO(raw_bytes)
         return buf, bucket_key
 
@@ -1186,7 +1209,9 @@ async def download_global_model(version_id: str = None):
                     return StreamingResponse(
                         buf,
                         media_type="application/octet-stream",
-                        headers={"Content-Disposition": f"attachment; filename={file_name}"},
+                        headers={
+                            "Content-Disposition": f"attachment; filename={file_name}"
+                        },
                     )
                 except Exception as dl_exc:
                     logger.warning(f"[Download] Bucket download failed: {dl_exc}")
@@ -1198,9 +1223,13 @@ async def download_global_model(version_id: str = None):
                     return StreamingResponse(
                         buf,
                         media_type="application/octet-stream",
-                        headers={"Content-Disposition": f"attachment; filename={bucket_key or os.path.basename(file_name)}"},
+                        headers={
+                            "Content-Disposition": f"attachment; filename={bucket_key or os.path.basename(file_name)}"
+                        },
                     )
-                logger.warning(f"[Download] Legacy path '{file_name}' not found on disk either.")
+                logger.warning(
+                    f"[Download] Legacy path '{file_name}' not found on disk either."
+                )
                 # Fall through to in-memory fallback
         except HTTPException:
             raise
@@ -1222,10 +1251,14 @@ async def download_global_model(version_id: str = None):
                     return StreamingResponse(
                         buf,
                         media_type="application/octet-stream",
-                        headers={"Content-Disposition": f"attachment; filename={file_name}"},
+                        headers={
+                            "Content-Disposition": f"attachment; filename={file_name}"
+                        },
                     )
                 except Exception as dl_exc:
-                    logger.warning(f"[Download] Latest bucket download failed: {dl_exc}")
+                    logger.warning(
+                        f"[Download] Latest bucket download failed: {dl_exc}"
+                    )
         except Exception as exc:
             logger.warning(f"[Download] Latest version lookup failed: {exc}")
 
@@ -1241,7 +1274,9 @@ async def download_global_model(version_id: str = None):
             return StreamingResponse(
                 buf,
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": "attachment; filename=global_model_current.pt"},
+                headers={
+                    "Content-Disposition": "attachment; filename=global_model_current.pt"
+                },
             )
         except Exception as mm_exc:
             logger.error(f"[Download] In-memory fallback failed: {mm_exc}")
@@ -1598,7 +1633,9 @@ async def set_config(update: ConfigUpdate):
 # ---------------------------------------------------------------------------
 
 
-def _train_client_background(client_id: str, file_path: str, epochs: int = None, version_id: str = None):
+def _train_client_background(
+    client_id: str, file_path: str, epochs: int = None, version_id: str = None
+):
     """
     Background task triggered by CSV upload from the frontend.
     `epochs` overrides cfg.BG_TRAIN_EPOCHS when provided.
@@ -1707,15 +1744,25 @@ def _train_client_background(client_id: str, file_path: str, epochs: int = None,
             try:
                 logger.info(f"[BG Train] Fetching weights for version {version_id}")
                 # Fetch row to get file_path
-                res = storage.supabase.table("model_versions").select("file_path").eq("id", version_id).execute()
+                res = (
+                    storage.supabase.table("model_versions")
+                    .select("file_path")
+                    .eq("id", version_id)
+                    .execute()
+                )
                 if res.data and res.data[0].get("file_path"):
                     file_path_db = res.data[0]["file_path"]
                     gw = storage.download_model(file_path_db)
-                    logger.info(f"[BG Train] Successfully loaded weights for version {version_id}")
+                    logger.info(
+                        f"[BG Train] Successfully loaded weights for version {version_id}"
+                    )
             except Exception as e:
-                logger.error(f"[BG Train] Failed to load version {version_id}: {e}. Falling back to global model.")
+                logger.error(
+                    f"[BG Train] Failed to load version {version_id}: {e}. Falling back to global model."
+                )
 
         if gw is None:
+
             def _get_weights_sync() -> Dict[str, torch.Tensor]:
                 async def _inner():
                     async with model_lock:
@@ -1726,11 +1773,12 @@ def _train_client_background(client_id: str, file_path: str, epochs: int = None,
                     return loop.run_until_complete(_inner())
                 finally:
                     loop.close()
+
             gw = _get_weights_sync()
 
         if gw is None:
-             logger.error(f"[BG Train] No weights available to train on.")
-             return
+            logger.error(f"[BG Train] No weights available to train on.")
+            return
 
         # ── Step 4: Train on the CSV ─────────────────────────────────────────
         _epochs = max(1, min(int(epochs), 100000)) if epochs else cfg.BG_TRAIN_EPOCHS
@@ -1885,7 +1933,9 @@ async def upload_dataset(
                 if not chunk:
                     break
                 out.write(chunk)
-        logger.info(f"Dataset '{file.filename}' saved for {client_id} (streaming). epochs={safe_epochs}")
+        logger.info(
+            f"Dataset '{file.filename}' saved for {client_id} (streaming). epochs={safe_epochs}"
+        )
 
     elif dataset_url:
         parsed = urlparse(dataset_url)
@@ -1899,10 +1949,17 @@ async def upload_dataset(
             file_path, "wb"
         ) as out:
             shutil.copyfileobj(resp, out)
-        logger.info(f"Dataset downloaded from {dataset_url} for {client_id}. epochs={safe_epochs}")
+        logger.info(
+            f"Dataset downloaded from {dataset_url} for {client_id}. epochs={safe_epochs}"
+        )
 
-    background_tasks.add_task(_train_client_background, client_id, file_path, safe_epochs, version_id)
-    return {"message": f"Dataset received. Background training started ({safe_epochs} epoch(s)).", "epochs": safe_epochs}
+    background_tasks.add_task(
+        _train_client_background, client_id, file_path, safe_epochs, version_id
+    )
+    return {
+        "message": f"Dataset received. Background training started ({safe_epochs} epoch(s)).",
+        "epochs": safe_epochs,
+    }
 
 
 @app.get("/api/model/weights/{client_id}")
@@ -1945,7 +2002,9 @@ async def get_client_weights(client_id: str):
         return StreamingResponse(
             buf,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": "attachment; filename=global_model_current.pt"},
+            headers={
+                "Content-Disposition": "attachment; filename=global_model_current.pt"
+            },
         )
 
     raise HTTPException(404, "No model available — upload a dataset first.")
