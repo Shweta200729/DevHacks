@@ -123,11 +123,17 @@ export default function CollaboratePage() {
     const handleSendMessage = async () => {
         if (!currentUserId || !selectedSessionId || !newMessage.trim()) return;
 
-        // Optimistic UI update could go here, but relying on realtime is safer
         const content = newMessage;
         setNewMessage(""); // clear input
 
-        await sendCollabMessage(selectedSessionId, currentUserId, content);
+        const sentMsg = await sendCollabMessage(selectedSessionId, currentUserId, content);
+        if (sentMsg) {
+            setChatMessages(prev => {
+                // Prevent duplicate if realtime already added it
+                if (prev.some(m => m.id === sentMsg.id)) return prev;
+                return [...prev, sentMsg];
+            });
+        }
     };
 
     // Derived state
