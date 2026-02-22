@@ -964,12 +964,6 @@ async def get_metrics():
                 f"[Metrics] Supabase read failed: {db_exc} — using in-memory cache"
             )
 
-    # ── 2. Fall back to in-memory when DB is empty / unavailable ─────────────
-    if not agg_rows and _mem_aggregations:
-        agg_rows = list(reversed(_mem_aggregations[-20:]))
-    if not eval_rows and _mem_evaluations:
-        eval_rows = list(reversed(_mem_evaluations[-20:]))
-
     return {
         "current_version": current_version_num,
         "evaluations": eval_rows,
@@ -1041,10 +1035,6 @@ async def get_clients():
         except Exception as exc:
             logger.warning(f"[Clients] Supabase read failed: {exc}")
 
-    # Fall back to in-memory when DB is empty / unavailable
-    if not db_rows and _mem_client_updates:
-        return {"data": list(reversed(_mem_client_updates[-50:]))}
-
     return {"data": db_rows}
 
 
@@ -1068,9 +1058,6 @@ async def get_versions():
         except Exception as exc:
             logger.error(f"Failed to fetch versions: {exc}")
 
-    if not db_rows and _mem_versions:
-        return {"data": list(reversed(_mem_versions[-50:]))}
-
     return {"data": db_rows}
 
 
@@ -1080,8 +1067,8 @@ async def get_train_metrics():
     Reads from Supabase first; falls back to in-memory accumulator.
     Used by the Evaluation page's 'Training Dataset' section.
     """
-    # Prefer Supabase (survives restarts)
-    source = _mem_train_history
+    # Read exclusively from Supabase
+    source = []
     if storage:
         try:
             db_rows = storage.read_recent_train_history(300)
