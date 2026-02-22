@@ -603,8 +603,6 @@ export default function OverviewPage() {
                                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-xs">
                                     <tr>
                                         <th className="px-4 py-3 font-semibold">Client ID</th>
-                                        <th className="px-4 py-3 font-semibold">Email</th>
-                                        <th className="px-4 py-3 font-semibold">Phone</th>
                                         <th className="px-4 py-3 font-semibold">Wallet Address</th>
                                         <th className="px-4 py-3 font-semibold text-right">Staked</th>
                                         <th className="px-4 py-3 font-semibold text-right">Balance</th>
@@ -615,8 +613,6 @@ export default function OverviewPage() {
                                         blockchainData.wallets.map((w, i) => (
                                             <tr key={i} className="hover:bg-slate-50 transition-colors">
                                                 <td className="px-4 py-3 font-medium text-slate-900 text-xs">{w.client_id}</td>
-                                                <td className="px-4 py-3 text-slate-500 text-xs">{w.email || '—'}</td>
-                                                <td className="px-4 py-3 text-slate-500 text-xs">{w.phone || '—'}</td>
                                                 <td className="px-4 py-3 font-mono text-slate-400 text-xs">{w.wallet}</td>
                                                 <td className="px-4 py-3 text-right">
                                                     <span className="font-semibold text-indigo-600">{w.staked} FLT</span>
@@ -627,7 +623,7 @@ export default function OverviewPage() {
                                             </tr>
                                         ))
                                     ) : (
-                                        <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">No active wallets yet.</td></tr>
+                                        <tr><td colSpan={4} className="px-4 py-8 text-center text-slate-400">No active wallets yet.</td></tr>
                                     )}
                                 </tbody>
                             </table>
