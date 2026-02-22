@@ -49,6 +49,7 @@ export interface ClientRow {
 export interface ModelVersion {
     id: string;
     version_num: number;
+    global_round: number;
     file_path: string;
     created_at: string;
 }
@@ -134,6 +135,41 @@ export function getModelDownloadUrl(versionId?: string): string {
     return versionId
         ? `${BASE}/model/download?version_id=${versionId}`
         : `${BASE}/model/download`;
+}
+
+/** POST /fl/api/dataset/upload — upload a CSV and kick off background training */
+export async function uploadDataset(
+    clientId: string,
+    file: File,
+    epochs: number,
+    versionId?: string
+): Promise<{ message: string; epochs: number } | null> {
+    try {
+        const form = new FormData();
+        form.append("client_id", clientId);
+        form.append("file", file);
+        form.append("epochs", String(epochs));
+        if (versionId) form.append("version_id", versionId);
+
+        const res = await fetch(`${BASE}/api/dataset/upload`, { method: "POST", body: form });
+        if (!res.ok) return null;
+        return res.json();
+    } catch {
+        return null;
+    }
+}
+
+export interface TrainingStatus {
+    current_version: number;
+    pending_count: number;
+    required_count: number;
+    pending_clients: string[];
+    round_active: boolean;
+}
+
+/** GET /fl/api/training/status — round progress for the Submit Training panel */
+export async function fetchTrainingStatus(): Promise<TrainingStatus | null> {
+    return get<TrainingStatus>("/api/training/status");
 }
 
 /** Poll helper: call cb every intervalMs ms, and immediately on mount */

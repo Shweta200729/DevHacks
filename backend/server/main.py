@@ -1611,9 +1611,10 @@ async def set_config(update: ConfigUpdate):
 # ---------------------------------------------------------------------------
 
 
-def _train_client_background(client_id: str, file_path: str):
+def _train_client_background(client_id: str, file_path: str, epochs: int = None, version_id: str = None):
     """
     Background task triggered by CSV upload from the frontend.
+    `epochs` overrides cfg.BG_TRAIN_EPOCHS when provided.
 
     Full pipeline:
       1. Parse CSV → detect input_dim + num_classes automatically.
@@ -1713,26 +1714,44 @@ def _train_client_background(client_id: str, file_path: str):
             val_loader = new_val_loader
             logger.info("[BG Train] Updated global val_loader from CSV.")
 
-        # ── Step 3: Get current global weights (sync snapshot) ───────────────
-        def _get_weights_sync() -> Dict[str, torch.Tensor]:
-            async def _inner():
-                async with model_lock:
-                    return global_model.get_weights()
-
-            loop = asyncio.new_event_loop()
+        # ── Step 3: Get current or specific weights ───────────────
+        gw = None
+        if version_id and storage:
             try:
-                return loop.run_until_complete(_inner())
-            finally:
-                loop.close()
+                logger.info(f"[BG Train] Fetching weights for version {version_id}")
+                # Fetch row to get file_path
+                res = storage.supabase.table("model_versions").select("file_path").eq("id", version_id).execute()
+                if res.data and res.data[0].get("file_path"):
+                    file_path_db = res.data[0]["file_path"]
+                    gw = storage.download_model(file_path_db)
+                    logger.info(f"[BG Train] Successfully loaded weights for version {version_id}")
+            except Exception as e:
+                logger.error(f"[BG Train] Failed to load version {version_id}: {e}. Falling back to global model.")
 
-        gw = _get_weights_sync()
+        if gw is None:
+            def _get_weights_sync() -> Dict[str, torch.Tensor]:
+                async def _inner():
+                    async with model_lock:
+                        return global_model.get_weights() if global_model else None
+
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(_inner())
+                finally:
+                    loop.close()
+            gw = _get_weights_sync()
+
+        if gw is None:
+             logger.error(f"[BG Train] No weights available to train on.")
+             return
 
         # ── Step 4: Train on the CSV ─────────────────────────────────────────
+        _epochs = max(1, min(int(epochs), 20)) if epochs else cfg.BG_TRAIN_EPOCHS
         saved_path, epoch_metrics = train_on_csv(
             client_id=client_id,
             csv_path=file_path,
             global_weights=gw,
-            epochs=cfg.BG_TRAIN_EPOCHS,
+            epochs=_epochs,
             device=cfg.DEVICE,
         )
 
@@ -1825,16 +1844,43 @@ def _train_client_background(client_id: str, file_path: str):
         logger.error(f"[BG Train] ❌ {client_id}: {exc}", exc_info=True)
 
 
+@app.get("/api/training/status")
+async def get_training_status():
+    """Lightweight endpoint for the Submit Training Round UI panel.
+    Returns how many clients have submitted weights for the current pending
+    aggregation queue, and how many are still required to trigger a new round.
+    """
+    async with model_lock:
+        pending_clients = [cid for cid, _ in pending_updates]
+        pending_count = len(pending_updates)
+
+    return {
+        "current_version": current_version_num,
+        "pending_count": pending_count,
+        "required_count": runtime_cfg.MIN_AGGREGATE_SIZE,
+        "pending_clients": pending_clients,
+        "round_active": global_model is not None,
+    }
+
+
 @app.post("/api/dataset/upload")
 async def upload_dataset(
     background_tasks: BackgroundTasks,
     client_id: str = Form(...),
     file: UploadFile = File(None),
     dataset_url: str = Form(None),
+    epochs: int = Form(None),
+    version_id: str = Form(None),
 ):
-    """Upload a dataset (file or URL) and trigger background local training."""
+    """Upload a dataset (file or URL) and trigger background local training.
+    Optional `epochs` form field (1-20) overrides the default BG_TRAIN_EPOCHS.
+    Optional `version_id` specifies which model version to fine-tune from.
+    """
     if not file and not dataset_url:
         raise HTTPException(400, "Provide file or dataset_url.")
+
+    # Clamp epochs to safe range
+    safe_epochs = max(1, min(int(epochs), 20)) if epochs else cfg.BG_TRAIN_EPOCHS
 
     client_dir = os.path.join(
         os.path.abspath(os.path.dirname(__file__)), "..", "data", f"client_{client_id}"
@@ -1852,7 +1898,7 @@ async def upload_dataset(
                 if not chunk:
                     break
                 out.write(chunk)
-        logger.info(f"Dataset '{file.filename}' saved for {client_id} (streaming).")
+        logger.info(f"Dataset '{file.filename}' saved for {client_id} (streaming). epochs={safe_epochs}")
 
     elif dataset_url:
         parsed = urlparse(dataset_url)
@@ -1866,10 +1912,10 @@ async def upload_dataset(
             file_path, "wb"
         ) as out:
             shutil.copyfileobj(resp, out)
-        logger.info(f"Dataset downloaded from {dataset_url} for {client_id}.")
+        logger.info(f"Dataset downloaded from {dataset_url} for {client_id}. epochs={safe_epochs}")
 
-    background_tasks.add_task(_train_client_background, client_id, file_path)
-    return {"message": "Dataset received. Background training started."}
+    background_tasks.add_task(_train_client_background, client_id, file_path, safe_epochs, version_id)
+    return {"message": f"Dataset received. Background training started ({safe_epochs} epoch(s)).", "epochs": safe_epochs}
 
 
 @app.get("/api/model/weights/{client_id}")
