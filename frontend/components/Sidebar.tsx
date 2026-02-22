@@ -10,7 +10,8 @@ import {
     Waypoints,
     LineChart,
     TerminalSquare,
-    Users2
+    Users2,
+    Swords
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -20,6 +21,7 @@ export function Sidebar() {
     const links = [
         { name: "Overview", href: "/dashboard", icon: LayoutDashboard },
         { name: "Clients", href: "/dashboard/clients", icon: Users },
+        { name: "Attack Lab", href: "/dashboard/attack-playground", icon: Swords },
         { name: "Network", href: "/dashboard/network", icon: Waypoints },
         { name: "Models", href: "/dashboard/models", icon: Network },
         { name: "Collaborate", href: "/dashboard/collaborate", icon: Users2 },

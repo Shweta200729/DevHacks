@@ -1154,6 +1154,9 @@ class SimulationRequest(BaseModel):
     client_name: str
     is_malicious: bool = False
     malicious_multiplier: float = cfg.NORM_THRESHOLD * 3
+    attack_type: str = "gaussian"  # "gaussian" | "label_flip" | "sign_flip"
+    noise_intensity: float = 1.0  # multiplier scaling factor (0.0 – 1.0+)
+    label_flip_ratio: float = 1.0  # fraction of labels to flip  (0.0 – 1.0)
 
 
 @app.post("/simulate")
@@ -1166,11 +1169,22 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
     if not global_model:
         raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
 
-    def _worker(name: str, malicious: bool, mult: float, vid):
+    def _worker(
+        name: str,
+        malicious: bool,
+        mult: float,
+        vid,
+        attack_type: str = "gaussian",
+        noise_intensity: float = 1.0,
+        label_flip_ratio: float = 1.0,
+    ):
         import asyncio as _as
+        import random as _rand
         from clients.local_training import get_updated_weights
 
-        logger.info(f"[Sim] Starting {name}")
+        logger.info(
+            f"[Sim] Starting {name} (attack={attack_type}, malicious={malicious})"
+        )
         db_client_id = storage.register_client(f"MOCK-{name}") if storage else name
 
         gw = _as.run(_async_get_weights())
@@ -1196,10 +1210,17 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
             else (global_model.input_shape[0],)
         )
         batch_shape = (16, *global_model.input_shape)
+        num_classes = global_model.num_classes
 
         for _ in range(5):
             inputs = torch.randn(*batch_shape)
-            targets = torch.randint(0, global_model.num_classes, (16,))
+            targets = torch.randint(0, num_classes, (16,))
+
+            # --- Label-flip attack: corrupt labels during training ---
+            if malicious and attack_type == "label_flip":
+                flip_mask = torch.rand(16) < label_flip_ratio
+                targets[flip_mask] = (num_classes - 1) - targets[flip_mask]
+
             optimizer.zero_grad()
             loss = criterion(local_m(inputs), targets)
             loss.backward()
@@ -1207,9 +1228,18 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
 
         weights = get_updated_weights(local_m)
 
+        # --- Post-training attack injection ---
         if malicious:
-            for key in weights:
-                weights[key] += torch.randn_like(weights[key]) * mult
+            effective_mult = mult * noise_intensity
+            if attack_type == "gaussian":
+                for key in weights:
+                    weights[key] += torch.randn_like(weights[key]) * effective_mult
+            elif attack_type == "sign_flip":
+                keys = list(weights.keys())
+                n_flip = max(1, int(len(keys) * noise_intensity))
+                for key in _rand.sample(keys, min(n_flip, len(keys))):
+                    weights[key] = -weights[key]
+            # label_flip already applied during training above
 
         status, reason, norm_val, dist_val = detect_update(weights, gw, cfg=runtime_cfg)
         if storage:
@@ -1232,6 +1262,9 @@ async def run_simulation(background_tasks: BackgroundTasks, req: SimulationReque
         req.is_malicious,
         req.malicious_multiplier,
         current_version_id,
+        req.attack_type,
+        req.noise_intensity,
+        req.label_flip_ratio,
     )
     return {"status": "Simulation started in background."}
 
@@ -1249,6 +1282,61 @@ async def _enqueue_and_aggregate(client_id: str, weights: Dict[str, torch.Tensor
             batch = list(pending_updates)
             pending_updates.clear()
             await _aggregate_and_update(batch)
+
+
+# ---------------------------------------------------------------------------
+# Attack probe  (instant preview for Attack Playground sliders)
+# ---------------------------------------------------------------------------
+
+
+class AttackProbeRequest(BaseModel):
+    noise_level: float = 100.0
+    attack_type: str = "gaussian"  # "gaussian" | "sign_flip"
+
+
+@app.post("/attack-probe")
+async def probe_attack(req: AttackProbeRequest):
+    """
+    Instant preview: would this noise level get caught by detection.py?
+    No training, no state mutation — purely diagnostic for the Attack Playground UI.
+    """
+    if not global_model:
+        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+
+    async with model_lock:
+        gw = global_model.get_weights()
+
+    # Build synthetic noisy weights
+    fake_weights = {}
+    if req.attack_type == "sign_flip":
+        import random as _rand
+
+        keys = list(gw.keys())
+        n_flip = max(1, int(len(keys) * min(req.noise_level / 1000.0, 1.0)))
+        for k, v in gw.items():
+            fake_weights[k] = v.clone()
+        for key in _rand.sample(keys, min(n_flip, len(keys))):
+            fake_weights[key] = -fake_weights[key]
+    else:
+        # gaussian (default)
+        for k, v in gw.items():
+            fake_weights[k] = v + torch.randn_like(v) * req.noise_level
+
+    status, reason, norm_val, dist_val = detect_update(
+        fake_weights, gw, cfg=runtime_cfg
+    )
+
+    return {
+        "caught": status == "REJECT",
+        "status": status,
+        "reason": reason,
+        "norm": round(norm_val, 2),
+        "norm_threshold": runtime_cfg.NORM_THRESHOLD,
+        "distance": round(dist_val, 2),
+        "distance_threshold": runtime_cfg.DISTANCE_THRESHOLD,
+        "slash_amount": 15 if status == "REJECT" else 0,
+        "reward_amount": 10 if status == "ACCEPT" else 0,
+    }
 
 
 # ---------------------------------------------------------------------------
