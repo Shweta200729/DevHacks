@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS clients (
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Collaboration sessions between users
+CREATE TABLE IF NOT EXISTS collab_sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    requester_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'rejected', 'completed', 'cancelled')),
+    shared_version_id INT REFERENCES model_versions(id) ON DELETE SET NULL,
+    round_submitted JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Global model checkpoints
 -- file_path is nullable: version 0 seed row has no file yet
 CREATE TABLE IF NOT EXISTS model_versions (

@@ -37,10 +37,12 @@ export default function CollaboratePage() {
 
     const loadData = useCallback(async () => {
         if (!currentUserId) return;
+
         const [u, s] = await Promise.all([
             fetchCollabUsers(),
             fetchMyCollabSessions(currentUserId),
         ]);
+
         setAllUsers(u.filter(user => user.id !== currentUserId));
         setSessions(s);
     }, [currentUserId]);

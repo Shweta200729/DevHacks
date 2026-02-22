@@ -91,6 +91,8 @@ def _get_user(sb, user_id: int) -> Dict:
     except HTTPException:
         raise
     except Exception as e:
+        if "0 rows" in str(e):
+            raise HTTPException(404, f"User {user_id} not found.")
         raise HTTPException(500, f"User lookup failed: {e}")
 
 
@@ -111,6 +113,29 @@ async def list_users():
     except Exception as e:
         raise HTTPException(500, f"Could not fetch users: {e}")
 
+
+@collab_router.get("/debug")
+async def debug_env():
+    import os
+    return {
+        "role_key_exists": bool(os.environ.get("SUPABASE_ROLE_KEY")),
+        "anon_key_exists": bool(os.environ.get("SUPABASE_ANON_KEY")),
+        "supabase_url": os.environ.get("SUPABASE")
+    }
+
+@collab_router.get("/test_insert")
+async def test_insert():
+    sb = _require_sb()
+    try:
+        r = sb.table("collab_sessions").insert({
+            "requester_id": 1,
+            "recipient_id": 3,
+            "status": "pending",
+            "message": "test"
+        }).execute()
+        return {"success": True, "data": r.data}
+    except Exception as e:
+        return {"success": False, "error": str(e), "repr": repr(e)}
 
 # ---------------------------------------------------------------------------
 # POST /collab/request — send a collaboration invite
@@ -157,13 +182,13 @@ async def send_collab_request(body: CollabRequestBody, requester_id: int):
 
     # Insert new pending session
     try:
-        r = sb.table("collab_sessions").insert({
+        insert_data = {
             "requester_id": requester_id,
             "recipient_id": body.to_user_id,
-            "message":      body.message or "",
             "status":       "pending",
             "updated_at":   _now_iso(),
-        }).execute()
+        }
+        r = sb.table("collab_sessions").insert(insert_data).execute()
         session = r.data[0]
         logger.info(
             f"[Collab] User {requester_id} invited User {body.to_user_id} "
@@ -171,7 +196,7 @@ async def send_collab_request(body: CollabRequestBody, requester_id: int):
         )
         return {"session_id": session["id"], "status": "pending"}
     except Exception as e:
-        raise HTTPException(500, f"Could not create session: {e}")
+        raise HTTPException(500, f"Could not create session: {e} | Insert Data: {insert_data}")
 
 
 # ---------------------------------------------------------------------------
@@ -359,8 +384,7 @@ async def mark_submitted(session_id: str, body: CollabSubmitBody):
     ready = set(submitted) >= all_members
 
     # Update DB
-    update_payload: Dict[str, Any] = {
-        "round_submitted": submitted,
+    update_payload = {
         "updated_at": _now_iso(),
     }
     if ready:
