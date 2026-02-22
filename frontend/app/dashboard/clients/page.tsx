@@ -73,6 +73,26 @@ export default function ClientsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // ── File parsed effect for default epochs ──────────────────────────────────
+    useEffect(() => {
+        if (!trainFile) return;
+
+        // Auto-detect number of lines in the CSV to use as default epochs
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const text = e.target?.result as string;
+            if (text) {
+                // Split by newline and filter out empty lines
+                const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+                // Subtract 1 for the header row, clamping between 1 and 100,000
+                const numDataRows = Math.max(1, Math.min(100000, lines.length - 1));
+                setTrainEpochs(numDataRows);
+                setTrainMsg({ type: "info", msg: `Detected ${numDataRows} data rows in the file. Defaulting to ${numDataRows} epochs.` });
+            }
+        };
+        reader.readAsText(trainFile);
+    }, [trainFile]);
+
     const fetchClientUpdates = async () => {
         try {
             const res = await fetch("http://localhost:8000/fl/clients");
@@ -139,6 +159,7 @@ export default function ClientsPage() {
                     msg: `✅ Training started (${result.epochs} epoch(s))! Once ${trainingStatus?.required_count ?? 1} client(s) submit, a new model version will be created.`,
                 });
                 setTrainFile(null);
+                setTrainEpochs(3); // Reset to a safe default
                 // Reset file input
                 const fi = document.getElementById("trainFileInput") as HTMLInputElement | null;
                 if (fi) fi.value = "";

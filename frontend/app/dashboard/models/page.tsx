@@ -78,8 +78,9 @@ export default function ModelsPage() {
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {versions.length > 0 ? versions.map((v, i) => {
-                                    const ev = evalMap[String(v.version_num)];
-                                    const ag = aggMap[String(v.version_num)];
+                                    // Note: we fall back to version_num if it doesn't match by ID, to handle legacy mock endpoints
+                                    const ev = evalMap[v.id] || evalMap[String(v.version_num)];
+                                    const ag = aggMap[v.id] || aggMap[String(v.version_num)];
                                     const isCurrent = i === 0;
                                     return (
                                         <tr key={v.id} className={`group transition-colors ${isCurrent ? "bg-blue-50/30 hover:bg-blue-50" : "hover:bg-slate-50"}`}>
@@ -101,21 +102,25 @@ export default function ModelsPage() {
                                                     ${ag?.method?.includes("DP") || ag?.method?.includes("Trimmed")
                                                         ? "bg-indigo-50 text-indigo-700 border-indigo-200"
                                                         : "bg-slate-100 text-slate-700 border-slate-200"}`}>
-                                                    {ag?.method ?? "—"}
+                                                    {ag?.method ?? "0"}
                                                 </span>
                                             </td>
                                             <td className="px-6 py-4 text-center text-slate-700 font-medium">
-                                                {ag ? `${ag.total_accepted} / ${ag.total_rejected}` : "—"}
+                                                {ag ? `${ag.total_accepted} / ${ag.total_rejected}` : "0 / 0"}
                                             </td>
                                             <td className="px-6 py-4 text-center">
                                                 {ev?.accuracy != null ? (
                                                     <span className="inline-flex items-center justify-center bg-green-50 text-green-700 px-2 py-1 rounded text-xs font-bold border border-green-200">
                                                         {(ev.accuracy * 100).toFixed(2)}%
                                                     </span>
-                                                ) : "—"}
+                                                ) : (
+                                                    <span className="inline-flex items-center justify-center bg-slate-50 text-slate-500 px-2 py-1 rounded text-xs font-bold border border-slate-200">
+                                                        N/A
+                                                    </span>
+                                                )}
                                             </td>
                                             <td className="px-6 py-4 text-center font-mono text-slate-500 text-xs">
-                                                {ev?.loss != null ? ev.loss.toFixed(4) : "—"}
+                                                {ev?.loss != null ? ev.loss.toFixed(4) : "0"}
                                             </td>
                                             <td className="px-6 py-4 text-right text-slate-400 text-xs">
                                                 {new Date(v.created_at).toLocaleString()}
