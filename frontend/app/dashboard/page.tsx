@@ -590,28 +590,32 @@ export default function OverviewPage() {
                             <table className="w-full text-sm text-left">
                                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-xs">
                                     <tr>
-                                        <th className="px-5 py-3 font-semibold">Client ID</th>
-                                        <th className="px-5 py-3 font-semibold">Wallet Address</th>
-                                        <th className="px-5 py-3 font-semibold text-right">Staked</th>
-                                        <th className="px-5 py-3 font-semibold text-right">Balance</th>
+                                        <th className="px-4 py-3 font-semibold">Client ID</th>
+                                        <th className="px-4 py-3 font-semibold">Email</th>
+                                        <th className="px-4 py-3 font-semibold">Phone</th>
+                                        <th className="px-4 py-3 font-semibold">Wallet Address</th>
+                                        <th className="px-4 py-3 font-semibold text-right">Staked</th>
+                                        <th className="px-4 py-3 font-semibold text-right">Balance</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {blockchainData?.wallets && blockchainData.wallets.length > 0 ? (
                                         blockchainData.wallets.map((w, i) => (
                                             <tr key={i} className="hover:bg-slate-50 transition-colors">
-                                                <td className="px-5 py-3 font-medium text-slate-900 text-xs">{w.client_id}</td>
-                                                <td className="px-5 py-3 font-mono text-slate-400 text-xs">{w.wallet}</td>
-                                                <td className="px-5 py-3 text-right">
+                                                <td className="px-4 py-3 font-medium text-slate-900 text-xs">{w.client_id}</td>
+                                                <td className="px-4 py-3 text-slate-500 text-xs">{w.email || '—'}</td>
+                                                <td className="px-4 py-3 text-slate-500 text-xs">{w.phone || '—'}</td>
+                                                <td className="px-4 py-3 font-mono text-slate-400 text-xs">{w.wallet}</td>
+                                                <td className="px-4 py-3 text-right">
                                                     <span className="font-semibold text-indigo-600">{w.staked} FLT</span>
                                                 </td>
-                                                <td className="px-5 py-3 text-right text-slate-700 font-medium">
+                                                <td className="px-4 py-3 text-right text-slate-700 font-medium">
                                                     {w.balance} FLT
                                                 </td>
                                             </tr>
                                         ))
                                     ) : (
-                                        <tr><td colSpan={4} className="px-5 py-8 text-center text-slate-400">No active wallets yet.</td></tr>
+                                        <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">No active wallets yet.</td></tr>
                                     )}
                                 </tbody>
                             </table>
@@ -643,8 +647,8 @@ export default function OverviewPage() {
                                                 <td className="px-4 py-3">
                                                     <div className="flex flex-col gap-1">
                                                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold self-start border ${tx.action === 'STAKE' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                                                                tx.action === 'REWARD' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                                    'bg-red-50 text-red-700 border-red-200'
+                                                            tx.action === 'REWARD' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                                'bg-red-50 text-red-700 border-red-200'
                                                             }`}>
                                                             {tx.action}
                                                         </span>

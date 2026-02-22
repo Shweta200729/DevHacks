@@ -63,7 +63,21 @@ async def signup(request: SignupRequest):
         }
         response = supabase.table("users").insert(user_data).execute()
 
-        return {"message": "User created successfully", "user": response.data}
+        # Auto-create blockchain wallet + stake for the new user
+        # This populates the Web3 Token Economy table on the dashboard
+        try:
+            from server.blockchain import get_or_create_wallet
+
+            wallet_addr = get_or_create_wallet(request.name)
+        except Exception as wallet_err:
+            print(f"Wallet creation skipped: {wallet_err}")
+            wallet_addr = None
+
+        return {
+            "message": "User created successfully",
+            "user": response.data,
+            "wallet": wallet_addr,
+        }
     except Exception as e:
         print(f"Signup error: {e}")
         raise HTTPException(
@@ -91,6 +105,15 @@ async def login(request: LoginRequest):
         ):
             raise HTTPException(status_code=400, detail="Invalid email or password")
 
+        # Ensure blockchain wallet exists for this user (idempotent)
+        wallet_addr = None
+        try:
+            from server.blockchain import get_or_create_wallet
+
+            wallet_addr = get_or_create_wallet(user["name"])
+        except Exception:
+            pass
+
         # Return user details securely (without password_hash)
         return {
             "message": "Login successful",
@@ -99,6 +122,7 @@ async def login(request: LoginRequest):
                 "name": user["name"],
                 "email": user["email"],
                 "phone": user["phone"],
+                "wallet": wallet_addr,
             },
         }
     except HTTPException:
