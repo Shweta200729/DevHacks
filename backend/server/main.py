@@ -62,13 +62,30 @@ from server.aggregator import aggregate
 
 
 # ── Import Blockchain Rules ────────────────────────────────────────────────
-from server.blockchain import (
-    get_or_create_wallet,
-    reward_client,
-    slash_client,
-    get_all_status,
-    get_recent_transactions,
-)
+# Wrapped in try/except so the server always starts even if blockchain.py
+# has a dependency issue (e.g. missing native libs on some platforms).
+try:
+    from server.blockchain import (
+        get_or_create_wallet,
+        reward_client,
+        slash_client,
+        get_all_status,
+        get_recent_transactions,
+    )
+    _BLOCKCHAIN_AVAILABLE = True
+except Exception as _bc_err:
+    import logging as _log
+    _log.getLogger(__name__).warning(
+        f"[Blockchain] Import failed ({_bc_err}) — using no-op stubs. "
+        "Token economy features will be disabled."
+    )
+    _BLOCKCHAIN_AVAILABLE = False
+
+    def get_or_create_wallet(client_id: str) -> str:      return ""
+    def reward_client(client_id: str, amount: int = 10):  return None
+    def slash_client(client_id: str, amount: int = 15):   return None
+    def get_all_status() -> list:                         return []
+    def get_recent_transactions() -> list:                return []
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 from experiments.evaluation import evaluate_model
@@ -121,6 +138,7 @@ _mem_evaluations: List[Dict] = []
 _mem_aggregations: List[Dict] = []
 _mem_client_updates: List[Dict] = []
 _mem_versions: List[Dict] = []
+_mem_train_history: List[Dict] = []  # per-epoch training stats from csv_trainer
 
 
 def _mem_log_client_update(
@@ -627,6 +645,37 @@ async def get_versions():
     return {"data": db_rows}
 
 
+@app.get("/train-metrics")
+async def get_train_metrics():
+    """Per-epoch training stats captured from CSV training runs.
+    Used by the Evaluation page's 'Training Dataset' section.
+    Returns epochs grouped by round for the frontend charts.
+    """
+    if not _mem_train_history:
+        return {"data": [], "rounds": []}
+
+    # Group by round for the chart
+    rounds: Dict[int, List[Dict]] = {}
+    for entry in _mem_train_history:
+        r = entry["round"]
+        rounds.setdefault(r, []).append(entry)
+
+    # Build chart-friendly flat list: label = "r{round}e{epoch}"
+    chart_data = []
+    for r in sorted(rounds.keys()):
+        for ep in sorted(rounds[r], key=lambda x: x["epoch"]):
+            chart_data.append({
+                "label": f"R{r}E{ep['epoch']}",
+                "round": r,
+                "epoch": ep["epoch"],
+                "loss": ep["loss"],
+                "accuracy": ep["accuracy"],
+                "client_id": ep.get("client_id", ""),
+                "created_at": ep.get("created_at", ""),
+            })
+
+    return {"data": chart_data, "total_epochs": len(chart_data)}
+
 @app.get("/model/download")
 async def download_global_model(version_id: str = None):
     """Download a specific (or latest) global model checkpoint."""
@@ -951,13 +1000,29 @@ def _train_client_background(client_id: str, file_path: str):
         gw = _get_weights_sync()
 
         # ── Step 4: Train on the CSV ─────────────────────────────────────────
-        saved_path = train_on_csv(
+        saved_path, epoch_metrics = train_on_csv(
             client_id=client_id,
             csv_path=file_path,
             global_weights=gw,
             epochs=cfg.BG_TRAIN_EPOCHS,
             device=cfg.DEVICE,
         )
+
+        # Store per-epoch training history in-memory (for dashboard Training section)
+        if epoch_metrics:
+            import datetime as _dt2
+            _round_ts = _dt2.datetime.utcnow().isoformat() + "Z"
+            for em in epoch_metrics:
+                _mem_train_history.append({
+                    "client_id": client_id,
+                    "round": current_version_num + 1,   # +1: training precedes aggregation
+                    "epoch": em["epoch"],
+                    "loss": _safe_float(em["loss"]),
+                    "accuracy": _safe_float(em["accuracy"]),
+                    "created_at": _round_ts,
+                })
+            if len(_mem_train_history) > 300:
+                del _mem_train_history[:len(_mem_train_history) - 300]
 
         if not saved_path:
             logger.warning(f"[BG Train] ⚠️ No weights produced for {client_id}")

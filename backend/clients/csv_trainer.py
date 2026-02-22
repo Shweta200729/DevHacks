@@ -257,7 +257,8 @@ def train_on_csv(
         device:         "cpu" or "cuda".
 
     Returns:
-        Path to saved weights file, or None on failure.
+        Tuple of (weights_path_or_None, epoch_metrics_list).
+        epoch_metrics_list: [{epoch, loss, accuracy}, ...] one entry per epoch.
     """
     from models.model_factory import build_model
     from config.settings import settings as cfg
@@ -313,6 +314,8 @@ def train_on_csv(
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(local_model.parameters(), lr=lr, momentum=0.9)
 
+        epoch_metrics: List[Dict] = []
+
         for epoch in range(1, epochs + 1):
             epoch_loss = 0.0
             correct = 0
@@ -338,10 +341,16 @@ def train_on_csv(
                 total += targets.size(0)
 
             acc = correct / max(total, 1)
+            epoch_loss_avg = epoch_loss / max(len(loader), 1)
             logger.info(
                 f"[CSV Train] {client_id} epoch {epoch}/{epochs} | "
-                f"loss={epoch_loss/max(len(loader),1):.4f} | acc={acc*100:.1f}%"
+                f"loss={epoch_loss_avg:.4f} | acc={acc*100:.1f}%"
             )
+            epoch_metrics.append({
+                "epoch": epoch,
+                "loss": round(float(epoch_loss_avg), 6),
+                "accuracy": round(float(acc), 6),
+            })
 
         # ── Step 6: Save weights ─────────────────────────────────────────
         client_dir = os.path.dirname(csv_path)
@@ -353,8 +362,8 @@ def train_on_csv(
         torch.save(updated, weights_path)
 
         logger.info(f"[CSV Train] ✅ Saved weights → {weights_path}")
-        return weights_path
+        return weights_path, epoch_metrics
 
     except Exception as exc:
         logger.error(f"[CSV Train] ❌ {client_id}: {exc}", exc_info=True)
-        return None
+        return None, []
