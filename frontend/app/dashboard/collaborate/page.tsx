@@ -8,8 +8,11 @@ import {
     fetchMyCollabSessions,
     sendCollabRequest,
     respondToCollabRequest,
+    fetchCollabMessages,
+    sendCollabMessage,
     CollabUser,
-    CollabSession
+    CollabSession,
+    ChatMessage
 } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -35,6 +38,12 @@ export default function CollaboratePage() {
     const [sessions, setSessions] = useState<CollabSession[]>([]);
     const [search, setSearch] = useState("");
 
+    // Chat State
+    const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+    const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+    const [newMessage, setNewMessage] = useState("");
+    const messagesEndRef = React.useRef<HTMLDivElement>(null);
+
     const loadData = useCallback(async () => {
         if (!currentUserId) return;
 
@@ -51,7 +60,7 @@ export default function CollaboratePage() {
         loadData();
 
         // Setup real-time listener for incoming requests / status changes
-        const channel = supabase.channel('collab-changes')
+        const sessionChannel = supabase.channel('collab-changes')
             .on(
                 'postgres_changes',
                 { event: '*', schema: 'public', table: 'collab_sessions' },
@@ -61,8 +70,39 @@ export default function CollaboratePage() {
             )
             .subscribe();
 
-        return () => { supabase.removeChannel(channel); };
-    }, [loadData]);
+        // Listen for new chat messages
+        const chatChannel = supabase.channel('collab-messages')
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'collab_messages' },
+                (payload) => {
+                    const newMsg = payload.new as ChatMessage;
+                    if (selectedSessionId && newMsg.session_id === selectedSessionId) {
+                        setChatMessages(prev => [...prev, newMsg]);
+                    }
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(sessionChannel);
+            supabase.removeChannel(chatChannel);
+        };
+    }, [loadData, selectedSessionId]);
+
+    // Fetch messages when a session is selected
+    useEffect(() => {
+        if (selectedSessionId && currentUserId) {
+            fetchCollabMessages(currentUserId, selectedSessionId).then(msgs => {
+                setChatMessages(msgs);
+            });
+        }
+    }, [selectedSessionId, currentUserId]);
+
+    // Scroll chat to bottom
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [chatMessages]);
 
 
     const handleRequest = async (toUserId: number) => {
@@ -74,7 +114,20 @@ export default function CollaboratePage() {
     const handleRespond = async (sessionId: string, action: "accept" | "reject" | "cancel") => {
         if (!currentUserId) return;
         await respondToCollabRequest(currentUserId, sessionId, action);
+        if (action === "cancel" && selectedSessionId === sessionId) {
+            setSelectedSessionId(null);
+        }
         await loadData();
+    };
+
+    const handleSendMessage = async () => {
+        if (!currentUserId || !selectedSessionId || !newMessage.trim()) return;
+
+        // Optimistic UI update could go here, but relying on realtime is safer
+        const content = newMessage;
+        setNewMessage(""); // clear input
+
+        await sendCollabMessage(selectedSessionId, currentUserId, content);
     };
 
     // Derived state
@@ -218,20 +271,83 @@ export default function CollaboratePage() {
                                                 )}
                                             </div>
 
-                                            <p className="text-[13px] text-slate-500 leading-relaxed">
-                                                Both participants must submit updates using this specific Session ID before the global aggregation executes.
-                                            </p>
-
-                                            <button className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center justify-center gap-2">
-                                                <Zap className="w-4 h-4 opacity-80" />
-                                                Submit Weights & Aggregate
-                                            </button>
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => setSelectedSessionId(selectedSessionId === s.id ? null : s.id)}
+                                                    className={`flex-1 py-2 font-semibold rounded-lg shadow-sm transition-colors flex items-center justify-center gap-2 ${selectedSessionId === s.id ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
+                                                >
+                                                    <BoxIcon className="w-4 h-4 opacity-80" />
+                                                    {selectedSessionId === s.id ? 'Close Chat' : 'Open Chat'}
+                                                </button>
+                                                <button className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center justify-center gap-2">
+                                                    <Zap className="w-4 h-4 opacity-80" />
+                                                    Submit Weights
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 ))
                             )}
                         </CardContent>
                     </Card>
+
+                    {/* CHAT WINDOW (Only visible if a session is selected) */}
+                    {selectedSessionId && (
+                        <Card className="bg-white border-slate-200 shadow-sm overflow-hidden flex flex-col mt-2">
+                            <CardHeader className="pb-3 border-b border-slate-100 bg-indigo-50/50">
+                                <CardTitle className="text-base font-bold flex items-center gap-2 text-indigo-800">
+                                    <Users2 className="w-4 h-4 text-indigo-500" />
+                                    Session Chat
+                                </CardTitle>
+                            </CardHeader>
+                            <CardContent className="p-0 flex flex-col h-[400px]">
+                                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/30 custom-scrollbar">
+                                    {chatMessages.length === 0 ? (
+                                        <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                                            <p className="text-sm">No messages yet.</p>
+                                            <p className="text-xs mt-1">Say hi to your collaborator!</p>
+                                        </div>
+                                    ) : (
+                                        chatMessages.map(msg => {
+                                            const isMe = msg.sender_id === currentUserId;
+                                            return (
+                                                <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                                                    <div className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm ${isMe ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-white border border-slate-200 text-slate-800 shadow-sm rounded-bl-sm'}`}>
+                                                        <p>{msg.content}</p>
+                                                        <span className={`text-[10px] block mt-1 ${isMe ? 'text-indigo-200' : 'text-slate-400'}`}>
+                                                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                    <div ref={messagesEndRef} />
+                                </div>
+                                <div className="p-3 border-t border-slate-100 bg-white">
+                                    <form
+                                        onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }}
+                                        className="flex gap-2"
+                                    >
+                                        <input
+                                            type="text"
+                                            value={newMessage}
+                                            onChange={e => setNewMessage(e.target.value)}
+                                            placeholder="Type a message..."
+                                            className="flex-1 px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={!newMessage.trim()}
+                                            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium text-sm"
+                                        >
+                                            Send
+                                        </button>
+                                    </form>
+                                </div>
+                            </CardContent>
+                        </Card>
+                    )}
 
                 </div>
 

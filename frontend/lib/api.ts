@@ -213,6 +213,15 @@ export interface CollabSession {
     };
 }
 
+export interface ChatMessage {
+    id: string;
+    session_id: string;
+    sender_id: number;
+    content: string;
+    created_at: string;
+    updated_at: string;
+}
+
 export async function fetchCollabUsers(): Promise<CollabUser[]> {
     const res = await get<{ data: CollabUser[] }>("/collab/users");
     return res?.data ?? [];
@@ -243,4 +252,14 @@ export async function cancelCollabSession(userId: number, sessionId: string): Pr
     } catch {
         return null;
     }
+}
+
+export async function fetchCollabMessages(userId: number, sessionId: string): Promise<ChatMessage[]> {
+    const res = await get<{ data: ChatMessage[] }>(`/collab/session/${sessionId}/messages?user_id=${userId}`);
+    return res?.data ?? [];
+}
+
+export async function sendCollabMessage(sessionId: string, senderId: number, content: string): Promise<ChatMessage | null> {
+    const res = await post<{ data: ChatMessage }>(`/collab/session/${sessionId}/messages`, { sender_id: senderId, content });
+    return res?.data ?? null;
 }

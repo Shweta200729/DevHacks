@@ -67,6 +67,11 @@ class CollabSubmitBody(BaseModel):
     client_id: str       # FL client_name (e.g. "EdgeNode-001")
 
 
+class CollabMessageBody(BaseModel):
+    sender_id: int
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -438,3 +443,72 @@ async def cancel_session(session_id: str, user_id: int):
         raise HTTPException(500, f"Cancel failed: {e}")
 
     return {"session_id": session_id, "status": "cancelled"}
+
+
+# ---------------------------------------------------------------------------
+# GET /collab/session/{id}/messages — get chat messages
+# ---------------------------------------------------------------------------
+
+@collab_router.get("/session/{session_id}/messages")
+async def get_session_messages(session_id: str, user_id: int):
+    """Fetch chat messages for a collaboration session."""
+    sb = _require_sb()
+    try:
+        r = sb.table("collab_sessions").select("*").eq("id", session_id).single().execute()
+        if not r.data:
+            raise HTTPException(404, "Session not found.")
+        session = r.data
+    except Exception as e:
+        raise HTTPException(500, f"Session lookup failed: {e}")
+
+    if user_id not in (session["requester_id"], session["recipient_id"]):
+        raise HTTPException(403, "Access denied.")
+
+    try:
+        msgs = (
+            sb.table("collab_messages")
+            .select("*")
+            .eq("session_id", session_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        return {"data": msgs.data or []}
+    except Exception as e:
+        raise HTTPException(500, f"Could not fetch messages: {e}")
+
+
+# ---------------------------------------------------------------------------
+# POST /collab/session/{id}/messages — send a chat message
+# ---------------------------------------------------------------------------
+
+@collab_router.post("/session/{session_id}/messages")
+async def send_session_message(session_id: str, body: CollabMessageBody):
+    """Send a chat message within an active collaboration session."""
+    sb = _require_sb()
+    
+    # Check session exists and is active
+    try:
+        r = sb.table("collab_sessions").select("status,requester_id,recipient_id").eq("id", session_id).single().execute()
+        if not r.data:
+            raise HTTPException(404, "Session not found.")
+        session = r.data
+    except Exception as e:
+        raise HTTPException(500, f"Session lookup failed: {e}")
+
+    if session["status"] != "active":
+        raise HTTPException(403, "Messages can only be sent in active sessions.")
+
+    if body.sender_id not in (session["requester_id"], session["recipient_id"]):
+        raise HTTPException(403, "Only participants can send messages.")
+
+    try:
+        insert_data = {
+            "session_id": session_id,
+            "sender_id":  body.sender_id,
+            "content":    body.content,
+            "updated_at": _now_iso(),
+        }
+        r = sb.table("collab_messages").insert(insert_data).execute()
+        return {"data": r.data[0]}
+    except Exception as e:
+        raise HTTPException(500, f"Could not send message: {e}")
