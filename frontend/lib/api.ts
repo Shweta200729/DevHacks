@@ -150,8 +150,23 @@ export async function uploadDataset(
         form.append("file", file);
         form.append("epochs", String(epochs));
         if (versionId) form.append("version_id", versionId);
-
         const res = await fetch(`${BASE}/api/dataset/upload`, { method: "POST", body: form });
+        if (!res.ok) return null;
+        return res.json();
+    } catch {
+        return null;
+    }
+}
+
+/** POST /fl/api/dataset/test — check CSV structure for topic validation */
+export async function testDataset(
+    file: File
+): Promise<{ valid: boolean; detected_topic: string; message: string } | null> {
+    try {
+        const form = new FormData();
+        form.append("file", file);
+
+        const res = await fetch(`${BASE}/api/dataset/test`, { method: "POST", body: form });
         if (!res.ok) return null;
         return res.json();
     } catch {

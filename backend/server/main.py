@@ -30,6 +30,7 @@ import io
 import os
 import sys
 import ssl
+import csv
 import asyncio
 import logging
 import shutil
@@ -1895,6 +1896,80 @@ async def get_training_status():
         "required_count": runtime_cfg.MIN_AGGREGATE_SIZE,
         "pending_clients": pending_clients,
         "round_active": global_model is not None,
+    }
+
+
+
+@app.post("/api/dataset/test")
+async def test_dataset(
+    file: UploadFile = File(None),
+    dataset_url: str = Form(None),
+):
+    """Validate the topic/context of the uploaded dataset without starting a training run."""
+    if not file and not dataset_url:
+        raise HTTPException(400, "Provide file or dataset_url.")
+
+    content = ""
+    try:
+        if file:
+            first_chunk = await file.read(1024 * 10)  # Read 10KB
+            content = first_chunk.decode("utf-8", errors="ignore")
+            await file.seek(0)  # Reset pointer for the actual upload later
+        elif dataset_url:
+            req = urllib.request.Request(dataset_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp:
+                content = resp.read(1024 * 10).decode("utf-8", errors="ignore")
+    except Exception as e:
+        logger.error(f"[Test Dataset] Error reading data: {e}")
+        return {
+            "valid": False,
+            "detected_topic": "Error",
+            "message": f"Could not read dataset: {str(e)}",
+        }
+
+    if not content.strip():
+        return {
+            "valid": False,
+            "detected_topic": "Empty",
+            "message": "The dataset is empty or corrupted.",
+        }
+
+    lines = content.splitlines()
+    if not lines:
+        return {
+            "valid": False,
+            "detected_topic": "Empty",
+            "message": "The dataset contains no lines.",
+        }
+
+    header_line = lines[0].strip()
+    
+    # Heuristic detection logic
+    # Topic 1: Numerical Feature Classification (Target)
+    is_numerical = "Feature_1" in header_line and "Feature_2" in header_line and "Label" in header_line
+    
+    # Topic 2: Car Sales (Incorrect domain)
+    is_car_sales = "Car Model" in header_line or "Mileage" in header_line or "Sell Price" in header_line
+
+    if is_numerical:
+        return {
+            "valid": True,
+            "detected_topic": "Numerical Feature Classification",
+            "message": "Dataset structure verified: Standard high-dimensional features detected.",
+        }
+    
+    if is_car_sales:
+        return {
+            "valid": False,
+            "detected_topic": "Car Sales Data",
+            "message": "Topic mismatch: Expected numerical feature vectors, but found car dealership data. Please upload a dataset relevant to the current model version.",
+        }
+
+    # Catch-all
+    return {
+        "valid": False,
+        "detected_topic": "Unknown / Mixed",
+        "message": f"Topic mismatch: The dataset headers ({header_line[:50]}...) do not match the expected 'Numerical Feature Classification' domain.",
     }
 
 

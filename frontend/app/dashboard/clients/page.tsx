@@ -5,7 +5,7 @@ import {
     PlayCircle, ShieldAlert, CopyCheck, AlertTriangle,
     Upload, Download, Users, CheckCircle2, Clock, Cpu, ChevronDown
 } from "lucide-react";
-import { uploadDataset, fetchTrainingStatus, TrainingStatus, fetchVersions, ModelVersion } from "@/lib/api";
+import { uploadDataset, testDataset, fetchTrainingStatus, TrainingStatus, fetchVersions, ModelVersion } from "@/lib/api";
 
 interface ClientUpdate {
     client_id: string;
@@ -37,6 +37,9 @@ export default function ClientsPage() {
     const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
     const [modelVersions, setModelVersions] = useState<ModelVersion[]>([]);
     const [selectedVersionId, setSelectedVersionId] = useState<string>("");
+    const [isTestingDataset, setIsTestingDataset] = useState(false);
+    const [isDatasetValid, setIsDatasetValid] = useState(false);
+    const [testResult, setTestResult] = useState<{ valid: boolean; topic: string; msg: string } | null>(null);
     const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // ── Init ──────────────────────────────────────────────────────────────────
@@ -132,6 +135,38 @@ export default function ClientsPage() {
             setSimMessage({ type: "err", msg: "Network error — is the backend running on port 8000?" });
         } finally {
             setIsSimulating(false);
+        }
+    };
+
+    const handleTestData = async () => {
+        if (!trainFile) {
+            setTrainMsg({ type: "err", msg: "Please select a CSV file first." });
+            return;
+        }
+        setIsTestingDataset(true);
+        setTestResult(null);
+        setTrainMsg(null);
+        try {
+            const res = await testDataset(trainFile);
+            if (res) {
+                setTestResult({
+                    valid: res.valid,
+                    topic: res.detected_topic,
+                    msg: res.message
+                });
+                setIsDatasetValid(res.valid);
+                if (res.valid) {
+                    setTrainMsg({ type: "ok", msg: "Dataset validated successfully! You can now submit your weights." });
+                } else {
+                    setTrainMsg({ type: "err", msg: `Validation Failed: ${res.message}` });
+                }
+            } else {
+                setTrainMsg({ type: "err", msg: "Test request failed -- backend might be down." });
+            }
+        } catch {
+            setTrainMsg({ type: "err", msg: "Network error during dataset testing." });
+        } finally {
+            setIsTestingDataset(false);
         }
     };
 
@@ -276,19 +311,57 @@ export default function ClientsPage() {
                                 </div>
                             </div>
 
-                            {/* Submit button */}
-                            <button
-                                onClick={handleTrainSubmit}
-                                disabled={isTraining || !trainFile}
-                                className={`mt-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold text-sm shadow-lg transition-all
-                                    ${isTraining || !trainFile
-                                        ? "bg-emerald-900/40 text-emerald-600 cursor-not-allowed border border-emerald-800/40"
-                                        : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-emerald-900/50 active:scale-[0.98]"
-                                    }`}
-                            >
-                                <Upload className={`w-4 h-4 ${isTraining ? "animate-bounce" : ""}`} />
-                                {isTraining ? "Training in Progress…" : "Train & Submit Weights"}
-                            </button>
+                            {/* Validation and Submit buttons */}
+                            <div className="flex flex-col gap-2 mt-2">
+                                <div className="flex flex-wrap gap-3">
+                                    <button
+                                        onClick={handleTestData}
+                                        disabled={isTestingDataset || !trainFile}
+                                        className={`flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm shadow-lg transition-all
+                                            ${isTestingDataset || !trainFile
+                                                ? "bg-blue-900/40 text-blue-600 cursor-not-allowed border border-blue-800/40"
+                                                : "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/50 active:scale-[0.98]"
+                                            }`}
+                                    >
+                                        {isTestingDataset ? (
+                                            <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                            </svg>
+                                        ) : (
+                                            <CopyCheck className="w-4 h-4" />
+                                        )}
+                                        {isTestingDataset ? "Verifying..." : "Test Dataset"}
+                                    </button>
+
+                                    <button
+                                        onClick={handleTrainSubmit}
+                                        disabled={isTraining || !trainFile || !isDatasetValid}
+                                        className={`flex-1 flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm shadow-lg transition-all
+                                            ${isTraining || !trainFile || !isDatasetValid
+                                                ? "bg-emerald-900/40 text-emerald-600 cursor-not-allowed border border-emerald-800/40"
+                                                : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-emerald-900/50 active:scale-[0.98]"
+                                            }`}
+                                    >
+                                        <Upload className={`w-4 h-4 ${isTraining ? "animate-bounce" : ""}`} />
+                                        {isTraining ? "Training..." : "Train & Submit Weights"}
+                                    </button>
+                                </div>
+
+                                {/* Validation Results */}
+                                {testResult && (
+                                    <div className={`p-3 rounded-lg border flex flex-col gap-1 transition-all animate-in fade-in slide-in-from-top-1
+                                        ${testResult.valid ? "bg-emerald-900/20 border-emerald-500/30" : "bg-red-900/20 border-red-500/30"}`}>
+                                        <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
+                                            {testResult.valid ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-red-400" />}
+                                            <span className={testResult.valid ? "text-emerald-400" : "text-red-400"}>
+                                                Dataset Topic Validated: {testResult.topic}
+                                            </span>
+                                        </div>
+                                        <p className="text-xs text-slate-300 ml-6">{testResult.msg}</p>
+                                    </div>
+                                )}
+                            </div>
 
                             {/* Training message */}
                             {trainMsg && (
