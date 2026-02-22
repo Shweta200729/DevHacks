@@ -76,6 +76,17 @@ CREATE TABLE IF NOT EXISTS aggregation_logs (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Per-epoch training metrics (persisted for Evaluation page Training section)
+CREATE TABLE IF NOT EXISTS train_history (
+    id          SERIAL      PRIMARY KEY,
+    client_id   TEXT        NOT NULL,
+    round       INT         NOT NULL,
+    epoch       INT         NOT NULL,
+    loss        NUMERIC,
+    accuracy    NUMERIC,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ─────────────────────────────────────────────────────────────
 -- D. Indexes for dashboard query performance
 -- ─────────────────────────────────────────────────────────────
@@ -83,6 +94,8 @@ CREATE INDEX IF NOT EXISTS idx_eval_version   ON evaluation_metrics (version_id 
 CREATE INDEX IF NOT EXISTS idx_agg_version    ON aggregation_logs   (version_id DESC);
 CREATE INDEX IF NOT EXISTS idx_cu_version     ON client_updates     (version_id DESC);
 CREATE INDEX IF NOT EXISTS idx_cu_created     ON client_updates     (created_at  DESC);
+CREATE INDEX IF NOT EXISTS idx_th_round       ON train_history      (round DESC);
+
 
 -- ─────────────────────────────────────────────────────────────
 -- E. Seed: baseline model version so Round 0 exists

@@ -149,20 +149,31 @@ def _mem_log_client_update(
     reason: str,
     version_id=None,
 ):
-    """Append a client update record to the in-memory list.
-    Used as fallback when Supabase is unavailable or tables don't exist yet.
-    """
+    """Persist a client update to Supabase (FK-safe) AND the in-memory list."""
     import datetime as _dt
+    # ── Supabase write (best-effort) ──
+    if storage and version_id is not None:
+        try:
+            storage.log_client_update(
+                version_id=int(version_id),
+                client_name=display_name,
+                status=status,
+                norm=_safe_float(norm_val) or 0.0,
+                dist=_safe_float(dist_val) or 0.0,
+                reason=reason,
+            )
+        except Exception as _e:
+            logger.warning(f"[DB] client_update write failed: {_e}")
+    # ── In-memory fallback (always) ──
     _mem_client_updates.append({
         "id": str(len(_mem_client_updates) + 1),
-        "client_id": display_name,          # human-readable name, not UUID
+        "client_id": display_name,
         "status": status,
         "norm_value": _safe_float(norm_val),
         "distance_value": _safe_float(dist_val),
         "reason": reason,
         "created_at": _dt.datetime.utcnow().isoformat() + "Z",
     })
-    # Keep only last 100 entries
     if len(_mem_client_updates) > 100:
         _mem_client_updates.pop(0)
 
@@ -258,6 +269,36 @@ async def startup_event():
                 await _init_fresh_model()
         else:
             await _init_fresh_model()
+
+    # ── 5. Warm-up: populate in-memory caches from Supabase (survive restarts) ──
+    if storage:
+        try:
+            db_evals = storage.read_recent_evaluations()
+            if db_evals:
+                _mem_evaluations.extend(db_evals)
+                logger.info(f"[Warm-up] Loaded {len(db_evals)} evaluation rows")
+
+            db_aggs = storage.read_recent_aggregations()
+            if db_aggs:
+                _mem_aggregations.extend(db_aggs)
+                logger.info(f"[Warm-up] Loaded {len(db_aggs)} aggregation rows")
+
+            db_cu = storage.read_recent_client_updates()
+            if db_cu:
+                _mem_client_updates.extend(db_cu)
+                logger.info(f"[Warm-up] Loaded {len(db_cu)} client update rows")
+
+            db_ver = storage.read_recent_versions()
+            if db_ver:
+                _mem_versions.extend(db_ver)
+                logger.info(f"[Warm-up] Loaded {len(db_ver)} model version rows")
+
+            db_th = storage.read_recent_train_history()
+            if db_th:
+                _mem_train_history.extend(db_th)
+                logger.info(f"[Warm-up] Loaded {len(db_th)} train history rows")
+        except Exception as wu_exc:
+            logger.warning(f"[Warm-up] Failed to pre-load Supabase data: {wu_exc}")
 
 
 async def _init_fresh_model():
@@ -648,29 +689,38 @@ async def get_versions():
 @app.get("/train-metrics")
 async def get_train_metrics():
     """Per-epoch training stats captured from CSV training runs.
+    Reads from Supabase first; falls back to in-memory accumulator.
     Used by the Evaluation page's 'Training Dataset' section.
-    Returns epochs grouped by round for the frontend charts.
     """
-    if not _mem_train_history:
-        return {"data": [], "rounds": []}
+    # Prefer Supabase (survives restarts)
+    source = _mem_train_history
+    if storage:
+        try:
+            db_rows = storage.read_recent_train_history(300)
+            if db_rows:
+                source = db_rows
+        except Exception as _e:
+            logger.warning(f"[/train-metrics] DB read failed: {_e}")
 
-    # Group by round for the chart
+    if not source:
+        return {"data": [], "total_epochs": 0}
+
+    # Group by round, sort within each round by epoch
     rounds: Dict[int, List[Dict]] = {}
-    for entry in _mem_train_history:
-        r = entry["round"]
+    for entry in source:
+        r = int(entry.get("round", 0))
         rounds.setdefault(r, []).append(entry)
 
-    # Build chart-friendly flat list: label = "r{round}e{epoch}"
     chart_data = []
     for r in sorted(rounds.keys()):
-        for ep in sorted(rounds[r], key=lambda x: x["epoch"]):
+        for ep in sorted(rounds[r], key=lambda x: int(x.get("epoch", 0))):
             chart_data.append({
-                "label": f"R{r}E{ep['epoch']}",
-                "round": r,
-                "epoch": ep["epoch"],
-                "loss": ep["loss"],
-                "accuracy": ep["accuracy"],
-                "client_id": ep.get("client_id", ""),
+                "label":      f"R{r}E{ep['epoch']}",
+                "round":      r,
+                "epoch":      ep["epoch"],
+                "loss":       ep.get("loss"),
+                "accuracy":   ep.get("accuracy"),
+                "client_id":  ep.get("client_id", ""),
                 "created_at": ep.get("created_at", ""),
             })
 
@@ -1008,19 +1058,31 @@ def _train_client_background(client_id: str, file_path: str):
             device=cfg.DEVICE,
         )
 
-        # Store per-epoch training history in-memory (for dashboard Training section)
+        # Store per-epoch training history in-memory and in Supabase
         if epoch_metrics:
             import datetime as _dt2
             _round_ts = _dt2.datetime.utcnow().isoformat() + "Z"
             for em in epoch_metrics:
                 _mem_train_history.append({
                     "client_id": client_id,
-                    "round": current_version_num + 1,   # +1: training precedes aggregation
+                    "round": current_version_num + 1,
                     "epoch": em["epoch"],
                     "loss": _safe_float(em["loss"]),
                     "accuracy": _safe_float(em["accuracy"]),
                     "created_at": _round_ts,
                 })
+                # Persist to Supabase (best-effort)
+                if storage:
+                    try:
+                        storage.log_train_epoch(
+                            client_id=client_id,
+                            round_num=current_version_num + 1,
+                            epoch=em["epoch"],
+                            loss=_safe_float(em["loss"]) or 0.0,
+                            accuracy=_safe_float(em["accuracy"]) or 0.0,
+                        )
+                    except Exception as _te:
+                        logger.warning(f"[DB] train_epoch write failed: {_te}")
             if len(_mem_train_history) > 300:
                 del _mem_train_history[:len(_mem_train_history) - 300]
 
