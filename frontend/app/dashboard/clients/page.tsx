@@ -22,7 +22,23 @@ export default function ClientsPage() {
     const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
-        setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+        // Load the actual user's name from localStorage so simulations use their real wallet identity!
+        const stored = localStorage.getItem("user");
+        if (stored) {
+            try {
+                const userObj = JSON.parse(stored);
+                if (userObj && userObj.name) {
+                    setSimName(userObj.name);
+                } else {
+                    setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+                }
+            } catch (e) {
+                setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+            }
+        } else {
+            setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+        }
+
         fetchClientUpdates();
         startPolling(3000);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -69,7 +85,6 @@ export default function ClientsPage() {
             });
             if (res.ok) {
                 setSimMessage({ type: "ok", msg: "Simulation started! Client data will appear below shortly." });
-                setSimName(`EdgeNode-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
                 // Fast poll for 20s so the row appears as soon as the worker finishes
                 startPolling(1000, 20000);
             } else if (res.status === 503) {
@@ -148,8 +163,8 @@ export default function ClientsPage() {
 
                     {simMessage && (
                         <div className={`mt-4 px-4 py-3 rounded-lg text-sm font-medium border flex items-center gap-2 ${simMessage.type === "ok" ? "bg-green-950/40 text-green-300 border-green-800/40" :
-                                simMessage.type === "err" ? "bg-red-950/40 text-red-300 border-red-800/40" :
-                                    "bg-indigo-950/40 text-indigo-300 border-indigo-800/40"
+                            simMessage.type === "err" ? "bg-red-950/40 text-red-300 border-red-800/40" :
+                                "bg-indigo-950/40 text-indigo-300 border-indigo-800/40"
                             }`}>
                             {simMessage.type === "info" && (
                                 <svg className="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">

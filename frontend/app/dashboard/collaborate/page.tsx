@@ -14,18 +14,19 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 
 export default function CollaboratePage() {
-    const [currentUserId, setCurrentUserId] = useState<number>(0);
+    // Read the logged-in user dynamically from localStorage instead of hardcoding it
+    const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
     useEffect(() => {
-        const userJson = localStorage.getItem("user");
-        if (userJson) {
+        const stored = localStorage.getItem("user");
+        if (stored) {
             try {
-                const user = JSON.parse(userJson);
-                if (user && user.id) {
-                    setCurrentUserId(user.id);
+                const userObj = JSON.parse(stored);
+                if (userObj && userObj.id) {
+                    setCurrentUserId(userObj.id);
                 }
             } catch (e) {
-                console.error("Failed to parse user from localStorage", e);
+                console.error("Failed to parse user session", e);
             }
         }
     }, []);

@@ -78,6 +78,18 @@ export default function OverviewPage() {
     };
 
     useEffect(() => {
+        const stored = localStorage.getItem("user");
+        if (stored) {
+            try {
+                const userObj = JSON.parse(stored);
+                if (userObj && userObj.name) {
+                    setUploadClientId(userObj.name);
+                }
+            } catch (e) {
+                console.error("Failed to parse user session", e);
+            }
+        }
+
         loadMetrics();
         startPolling(3000);
         return () => { if (pollIntervalRef.current) clearInterval(pollIntervalRef.current); };
