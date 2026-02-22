@@ -68,15 +68,28 @@ class SupabaseManager:
     # ── Model versions ────────────────────────────────────────────────────────
 
     def save_model_version(self, model_state_dict: Dict[str, torch.Tensor], version_num: int) -> int:
-        """Saves local PT checkpoint and Supabase log. Returns internal DB Version ID."""
+        """Saves local PT checkpoint and upserts a Supabase log row.
+        Uses UPSERT so re-running with the same version_num (e.g. after a restart)
+        updates the file_path instead of crashing with a unique-constraint error.
+        Returns the internal DB row id.
+        """
         file_path = os.path.join(self.models_dir, f"global_model_round_{version_num}.pt")
         torch.save(model_state_dict, file_path)
 
-        res = self.supabase.table("model_versions").insert({
-            "version_num": version_num,
-            "file_path": file_path,
-        }).execute()
-        return res.data[0]["id"]
+        try:
+            # Upsert: if version_num already exists, update file_path + created_at
+            res = (
+                self.supabase.table("model_versions")
+                .upsert(
+                    {"version_num": version_num, "file_path": file_path},
+                    on_conflict="version_num",
+                )
+                .execute()
+            )
+            return res.data[0]["id"]
+        except Exception as e:
+            logger.error(f"[Storage] save_model_version upsert failed: {e}")
+            raise  # re-raise so caller knows — DO NOT swallow this
 
     def get_latest_version(self) -> Dict[str, Any]:
         """Gets metadata for the active highest version available."""

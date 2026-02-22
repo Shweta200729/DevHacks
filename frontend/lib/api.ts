@@ -142,3 +142,69 @@ export function startPolling(cb: () => void, intervalMs = 3000): () => void {
     const id = setInterval(cb, intervalMs);
     return () => clearInterval(id);
 }
+
+// ─── Collaboration API ────────────────────────────────────────────────────────
+
+export interface CollabUser {
+    id: number;
+    name: string;
+    email: string;
+    created_at: string;
+}
+
+export interface CollabSession {
+    id: string;
+    requester_id: number;
+    recipient_id: number;
+    message: string;
+    status: "pending" | "active" | "rejected" | "completed" | "cancelled";
+    shared_version_id?: number | null;
+    round_submitted?: string[];
+    created_at: string;
+    updated_at: string;
+
+    // Enriched fields from GET /sessions
+    partner_name?: string;
+    partner_id?: number;
+    is_requester?: boolean;
+
+    // For GET /session/{id}
+    partner?: CollabUser;
+    round_progress?: {
+        submitted: string[];
+        waiting_for: string[];
+        ready_to_aggregate: boolean;
+    };
+}
+
+export async function fetchCollabUsers(): Promise<CollabUser[]> {
+    const res = await get<{ data: CollabUser[] }>("/collab/users");
+    return res?.data ?? [];
+}
+
+export async function sendCollabRequest(fromUserId: number, toUserId: number, message?: string): Promise<{ session_id: string, status: string } | null> {
+    return post(`/collab/request?requester_id=${fromUserId}`, { to_user_id: toUserId, message });
+}
+
+export async function respondToCollabRequest(userId: number, sessionId: string, action: "accept" | "reject" | "cancel"): Promise<{ session_id: string, status: string } | null> {
+    return post(`/collab/respond?user_id=${userId}`, { session_id: sessionId, action });
+}
+
+export async function fetchMyCollabSessions(userId: number): Promise<CollabSession[]> {
+    const res = await get<{ data: CollabSession[] }>(`/collab/sessions?user_id=${userId}`);
+    return res?.data ?? [];
+}
+
+export async function fetchCollabSessionDetail(userId: number, sessionId: string): Promise<CollabSession | null> {
+    return get<CollabSession>(`/collab/session/${sessionId}?user_id=${userId}`);
+}
+
+export async function cancelCollabSession(userId: number, sessionId: string): Promise<{ session_id: string, status: string } | null> {
+    try {
+        const res = await fetch(`${BASE}/collab/session/${sessionId}?user_id=${userId}`, { method: "DELETE" });
+        if (!res.ok) return null;
+        return res.json();
+    } catch {
+        return null;
+    }
+}

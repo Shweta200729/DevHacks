@@ -37,6 +37,24 @@ import urllib.request
 from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional, Tuple
 
+# ── Load .env FIRST so os.getenv() works everywhere (storage.py, etc.) ──────────
+# pydantic-settings only loads .env into its own Settings model, NOT into the
+# process environment. Calling load_dotenv() here puts every variable into
+# os.environ so that SupabaseManager().__init__ can read SUPABASE / SUPABASE_ROLE_KEY.
+_env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
+if os.path.exists(_env_file):
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv(_env_file, override=False)
+    except ImportError:
+        # python-dotenv not installed — parse manually as fallback
+        with open(_env_file) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    os.environ.setdefault(_k.strip(), _v.strip())
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -123,6 +141,7 @@ model_lock: asyncio.Lock = asyncio.Lock()
 storage: Optional[SupabaseManager] = None
 val_loader: Optional[DataLoader] = None
 pending_updates: List[Tuple[str, Dict[str, torch.Tensor]]] = []
+collab_pending_updates: Dict[str, List[Tuple[str, Dict[str, torch.Tensor]]]] = {}
 
 # Runtime-mutable config mirror — updated via POST /admin/config
 # Points to the singleton; only the DP/queue fields are hot-swappable.
@@ -192,28 +211,51 @@ def _safe_float(v: float, fallback: float = 0.0) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Startup
+# Storage — initialised at import time so it works even when this module
+# is mounted as a sub-app (sub-apps don't fire on_startup events on the
+# parent server). The root main.py calls init_fl_state() explicitly via
+# its own lifespan / startup hook.
 # ---------------------------------------------------------------------------
 
+def _try_init_storage() -> None:
+    """Best-effort storage init at module import time.
+    The real init happens in init_fl_state() called by the root app startup.
+    This is a safety net for the case where the sub-app IS run standalone."""
+    global storage
+    if storage is not None:
+        return
+    try:
+        storage = SupabaseManager()
+        logger.info("[Storage] SupabaseManager initialised at import time.")
+    except Exception as exc:
+        logger.warning(f"[Storage] Import-time init failed ({exc}) — will retry on startup.")
 
-@app.on_event("startup")
-async def startup_event():
-    """
-    Runs on server boot:
-    1. Initialise Supabase storage.
-    2. Load dataset (to learn input_shape & num_classes).
-    3. Build global model from those shapes.
-    4. Restore latest checkpoint if one exists.
-    5. Load validation DataLoader.
+_try_init_storage()
+
+
+# ---------------------------------------------------------------------------
+# Startup — called BOTH by on_event below (standalone mode) AND by the
+# root app's startup hook (sub-app mode via app.mount).
+# ---------------------------------------------------------------------------
+
+async def init_fl_state() -> None:
+    """Full server initialisation: Storage → Dataset → Model → Checkpoint → Warm-up.
+    Call this from whichever startup hook actually fires.
     """
     global storage, global_model, val_loader, current_version_id, current_version_num
 
-    # ── 1. Storage ────────────────────────────────────────────────────────────
-    try:
-        storage = SupabaseManager()
-        logger.info("SupabaseManager initialised.")
-    except Exception as exc:
-        logger.error(f"SupabaseManager init failed: {exc}")
+    # -- 1. Storage --------------------------------------------------------
+    _sb_url = os.environ.get("SUPABASE", "")
+    _sb_key = os.environ.get("SUPABASE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY", "")
+    logger.info(f"[Startup] SUPABASE env = '{_sb_url[:40]}' key={'SET' if _sb_key else 'MISSING'}")
+    if storage is None:  # may already be set from import-time init
+        try:
+            storage = SupabaseManager()
+            logger.info("[Startup] SupabaseManager initialised OK")
+        except Exception as exc:
+            logger.error(f"[Startup] SupabaseManager FAILED: {exc}")
+    else:
+        logger.info("[Startup] SupabaseManager already initialised (import-time).")
 
     # ── 2 & 3. Dataset → model (only if DATASET_NAME is configured) ─────────
     ssl._create_default_https_context = ssl._create_unverified_context
@@ -271,34 +313,63 @@ async def startup_event():
             await _init_fresh_model()
 
     # ── 5. Warm-up: populate in-memory caches from Supabase (survive restarts) ──
+    # CRITICAL: each table MUST have its OWN try/except so that one missing
+    # table (e.g. train_history not yet created) does NOT abort loading the others.
     if storage:
+        # Pre-load client UUID → name cache so reverse lookups work immediately
         try:
-            db_evals = storage.read_recent_evaluations()
-            if db_evals:
-                _mem_evaluations.extend(db_evals)
-                logger.info(f"[Warm-up] Loaded {len(db_evals)} evaluation rows")
+            _cl = storage.supabase.table("clients").select("id,client_name").execute()
+            for _row in (_cl.data or []):
+                storage._client_id_cache[_row["client_name"]] = _row["id"]
+            logger.info(f"[Warm-up] Cached {len(storage._client_id_cache)} client UUID mappings")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] clients cache: {_e}")
 
-            db_aggs = storage.read_recent_aggregations()
-            if db_aggs:
-                _mem_aggregations.extend(db_aggs)
-                logger.info(f"[Warm-up] Loaded {len(db_aggs)} aggregation rows")
+        try:
+            _ev = storage.read_recent_evaluations()
+            if _ev:
+                _mem_evaluations.extend(_ev)
+                logger.info(f"[Warm-up] Loaded {len(_ev)} evaluation rows")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] evaluations: {_e}")
 
-            db_cu = storage.read_recent_client_updates()
-            if db_cu:
-                _mem_client_updates.extend(db_cu)
-                logger.info(f"[Warm-up] Loaded {len(db_cu)} client update rows")
+        try:
+            _ag = storage.read_recent_aggregations()
+            if _ag:
+                _mem_aggregations.extend(_ag)
+                logger.info(f"[Warm-up] Loaded {len(_ag)} aggregation rows")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] aggregations: {_e}")
 
-            db_ver = storage.read_recent_versions()
-            if db_ver:
-                _mem_versions.extend(db_ver)
-                logger.info(f"[Warm-up] Loaded {len(db_ver)} model version rows")
+        try:
+            _cu = storage.read_recent_client_updates()
+            if _cu:
+                _mem_client_updates.extend(_cu)
+                logger.info(f"[Warm-up] Loaded {len(_cu)} client update rows")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] client_updates: {_e}")
 
-            db_th = storage.read_recent_train_history()
-            if db_th:
-                _mem_train_history.extend(db_th)
-                logger.info(f"[Warm-up] Loaded {len(db_th)} train history rows")
-        except Exception as wu_exc:
-            logger.warning(f"[Warm-up] Failed to pre-load Supabase data: {wu_exc}")
+        try:
+            _vr = storage.read_recent_versions()
+            if _vr:
+                _mem_versions.extend(_vr)
+                logger.info(f"[Warm-up] Loaded {len(_vr)} model version rows")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] versions: {_e}")
+
+        try:
+            _th = storage.read_recent_train_history()
+            if _th:
+                _mem_train_history.extend(_th)
+                logger.info(f"[Warm-up] Loaded {len(_th)} train history rows")
+        except Exception as _e:
+            logger.warning(f"[Warm-up] train_history (run SQL if table missing): {_e}")
+
+@app.on_event("startup")
+async def startup_event():
+    """Fires only when fl_app is run standalone. In sub-app mode the root
+    app's startup hook calls init_fl_state() directly."""
+    await init_fl_state()
 
 
 async def _init_fresh_model():
@@ -471,65 +542,202 @@ async def _run_aggregation_async(batch: List[Tuple]):
         await _aggregate_and_update(batch)
 
 
+def _run_aggregation_collab_sync(batch: List[Tuple], session_id: str):
+    """Aggregation for a specific collaboration session (2 clients)."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run_aggregation_collab_async(batch, session_id))
+    finally:
+        loop.close()
+
+
+async def _run_aggregation_collab_async(batch: List[Tuple], session_id: str):
+    logger.info(f"[Collab] Aggregating session {session_id} with {len(batch)} clients...")
+    weight_dicts = [w for _, w in batch]
+    from server.aggregator import fedavg
+    new_weights = fedavg(weight_dicts)
+
+    import time
+    rnd_ver = int(time.time() * 1000) % 2147483647
+    file_path = f"collab_model_{rnd_ver}.pt"
+    torch.save(new_weights, file_path)
+
+    if storage:
+        try:
+            # Create a model version
+            vr = storage.supabase.table("model_versions").insert({
+                "version_num": rnd_ver,
+                "file_path": file_path
+            }).execute()
+            new_v_id = vr.data[0]["id"]
+            
+            # Update the specific collaboration session pointer
+            storage.supabase.table("collab_sessions").update({
+                "shared_version_id": new_v_id,
+                "status": "completed",
+                "updated_at": _dt.datetime.utcnow().isoformat() + "Z"
+            }).eq("id", session_id).execute()
+            logger.info(f"[Collab] Session {session_id} aggregated and saved as version {rnd_ver}.")
+        except Exception as e:
+            logger.error(f"[Collab] DB save failed for session {session_id}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Core endpoints
 # ---------------------------------------------------------------------------
 
 
 @app.get("/model")
-async def get_global_model():
-    """Clients download current global model weights (.pt binary)."""
-    if not global_model:
-        raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
-    async with model_lock:
-        weights = global_model.get_weights()
+async def get_global_model(session_id: Optional[str] = None):
+    """Clients download current global model weights (.pt binary).
+    If session_id is provided, fetches the shared model for that Collab Session.
+    """
+    weights = None
+
+    if session_id and storage:
+        try:
+            r = storage.supabase.table("collab_sessions").select("shared_version_id").eq("id", session_id).single().execute()
+            svid = r.data.get("shared_version_id") if (r.data and "shared_version_id" in r.data) else None
+            if svid:
+                vr = storage.supabase.table("model_versions").select("file_path").eq("id", svid).single().execute()
+                fp = vr.data.get("file_path") if (vr.data and "file_path" in vr.data) else None
+                if fp and os.path.exists(fp):
+                    weights = torch.load(fp, weights_only=True, map_location="cpu")
+        except Exception as e:
+            logger.error(f"[Model] Could not get collab weights for {session_id}: {e}")
+
+    if weights is None:
+        if not global_model:
+            raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
+        async with model_lock:
+            weights = global_model.get_weights()
+
     buf = io.BytesIO()
     torch.save(weights, buf)
     buf.seek(0)
     return StreamingResponse(
         buf,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": "attachment; filename=global_model.pt"},
+        headers={"Content-Disposition": f"attachment; filename=model_{session_id or 'global'}.pt"},
     )
 
 
 @app.post("/update")
 async def receive_update(
     background_tasks: BackgroundTasks,
-    client_id: str = Form(...),
+    client_id:         str = Form(...),
+    wallet_address:    str = Form(default=""),
+    model_version:     int = Form(default=-1),
+    collab_session_id: str = Form(default=""),
+    collab_user_id:    int = Form(default=0),
     file: UploadFile = File(...),
 ):
     """
     Receives a client's locally-trained .pt weight file.
 
-    Flow:
-        1. Deserialise weights.
-        2. Byzantine detection against current global model.
-        3. REJECT → log + return.
-        4. ACCEPT → enqueue; if queue >= MIN_AGGREGATE_SIZE, aggregate.
+    Security checklist (Segment 7):
+      ─ File extension must be .pt
+      ─ File size must be ≤ 200 MB
+      ─ torch.load with weights_only=True (no arbitrary pickle)
+      ─ Keys must exactly match global model
+      ─ Tensor shapes must match global model
+
+    Version control (Segment 5):
+      ─ client model_version must equal current_version_num
+
+    Flow (Segments 2–4):
+      1. Security + version checks.
+      2. Deserialise + validate state_dict.
+      3. Byzantine detection.
+      4. REJECT → slash_client (background) + structured response.
+      5. ACCEPT → reward_client (background) + enqueue for aggregation.
     """
     global pending_updates
+
+    MAX_PT_BYTES = 200 * 1024 * 1024  # 200 MB hard cap
+
+    # ── Segment 7: extension check ───────────────────────────────────────
+    fname = file.filename or ""
+    if not fname.lower().endswith(".pt"):
+        raise HTTPException(400, f"Invalid file type '{fname}'. Only .pt files accepted.")
 
     if not global_model:
         raise HTTPException(503, "No model loaded yet. Upload a dataset first.")
 
+    # ── Segment 5: stale version check ───────────────────────────────
+    if model_version >= 0 and model_version != current_version_num:
+        return {
+            "status": "REJECTED",
+            "reason": (
+                f"Stale model version: client={model_version}, "
+                f"server={current_version_num}. Re-download the global model."
+            ),
+            "new_model_version": current_version_num,
+        }
+
+    # ── Segment 7: size cap + safe torch.load ────────────────────────
     try:
         raw = await file.read()
+        if len(raw) > MAX_PT_BYTES:
+            raise HTTPException(
+                400,
+                f"File too large ({len(raw):,} bytes). Max {MAX_PT_BYTES // (1024**2)} MB."
+            )
         client_weights: Dict[str, torch.Tensor] = torch.load(
             io.BytesIO(raw), weights_only=True, map_location="cpu"
         )
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(400, f"Invalid weight file: {exc}")
+        raise HTTPException(400, f"Invalid .pt file (could not load): {exc}")
 
-    async with model_lock:
-        global_weights = global_model.get_weights()
+    # ── Segment 7: key + shape validation ──────────────────────────
+    if collab_session_id and storage:
+        # Load the latest collab shared weights for validation
+        global_weights = None
+        try:
+            r = storage.supabase.table("collab_sessions").select("shared_version_id").eq("id", collab_session_id).single().execute()
+            if r.data and r.data.get("shared_version_id"):
+                vr = storage.supabase.table("model_versions").select("file_path").eq("id", r.data["shared_version_id"]).single().execute()
+                fp = vr.data.get("file_path") if vr.data else None
+                if fp and os.path.exists(fp):
+                    global_weights = torch.load(fp, weights_only=True, map_location="cpu")
+        except Exception:
+            pass
+        if not global_weights:
+            async with model_lock:
+                global_weights = global_model.get_weights()
         curr_vid = current_version_id or ""
+    else:
+        async with model_lock:
+            global_weights = global_model.get_weights()
+            curr_vid = current_version_id or ""
 
+    expected_keys = set(global_weights.keys())
+    uploaded_keys = set(client_weights.keys())
+    if expected_keys != uploaded_keys:
+        missing = expected_keys - uploaded_keys
+        extra   = uploaded_keys - expected_keys
+        raise HTTPException(
+            400,
+            f"State dict key mismatch. Missing: {missing or None}. Extra: {extra or None}."
+        )
+    shape_errors = []
+    for k in expected_keys:
+        if client_weights[k].shape != global_weights[k].shape:
+            shape_errors.append(
+                f"{k}: expected {tuple(global_weights[k].shape)}, "
+                f"got {tuple(client_weights[k].shape)}"
+            )
+    if shape_errors:
+        raise HTTPException(400, f"Tensor shape mismatch: {'; '.join(shape_errors[:5])}")
+
+    # ── Byzantine detection ──────────────────────────────────────────
     status, reason, norm_val, dist_val = detect_update(
         client_weights, global_weights, cfg=runtime_cfg
     )
 
-    # DB log (best-effort — db errors must not crash the endpoint)
+    # ── DB log (best-effort) ─────────────────────────────────────────
     if storage:
         try:
             db_uuid = storage.register_client(client_id)
@@ -539,33 +747,74 @@ async def receive_update(
         except Exception as db_err:
             logger.warning(f"DB log failed for {client_id}: {db_err}")
 
-    # Always log in-memory (Supabase is secondary)
     _mem_log_client_update(client_id, status, norm_val, dist_val, reason, version_id=curr_vid)
 
-    # Register/Stake in the blockchain economy
+    # ── Segment 4: blockchain as background task (non-blocking) ─────────
     get_or_create_wallet(client_id)
 
     if status == "REJECT":
-        slash_client(client_id)
+        background_tasks.add_task(slash_client, client_id)  # non-blocking
         logger.warning(f"[Update] REJECT [{client_id}]: {reason}")
-        return {"status": "REJECT", "reason": reason}
+        return {
+            "status":            "REJECTED",
+            "reason":           reason,
+            "new_model_version": current_version_num,
+        }
 
-    # Reward successful updates
-    reward_client(client_id)
+    background_tasks.add_task(reward_client, client_id)  # non-blocking
+
+    if collab_session_id:
+        if collab_session_id not in collab_pending_updates:
+            collab_pending_updates[collab_session_id] = []
+        collab_pending_updates[collab_session_id].append((client_id, client_weights))
+        q = len(collab_pending_updates[collab_session_id])
+        logger.info(
+            f"[Collab] ACCEPT [{client_id}] session={collab_session_id} "
+            f"— queue {q}/2"
+        )
+        
+        # Mark as submitted in DB (avoids frontend having to make a second API call)
+        if collab_user_id and storage:
+            try:
+                r = storage.supabase.table("collab_sessions").select("round_submitted").eq("id", collab_session_id).single().execute()
+                if r.data:
+                    submitted = r.data.get("round_submitted") or []
+                    if str(collab_user_id) not in submitted:
+                        submitted.append(str(collab_user_id))
+                        storage.supabase.table("collab_sessions").update({
+                            "round_submitted": submitted
+                        }).eq("id", collab_session_id).execute()
+            except Exception as e:
+                logger.error(f"[Collab] mark_submitted failed: {e}")
+
+        if q >= 2:
+            batch = list(collab_pending_updates[collab_session_id])
+            del collab_pending_updates[collab_session_id]
+            background_tasks.add_task(_run_aggregation_collab_sync, batch, collab_session_id)
+            
+        return {
+            "status":            "ACCEPTED",
+            "reason":           "Collab update queued.",
+            "new_model_version": current_version_num,
+        }
 
     async with model_lock:
         pending_updates.append((client_id, client_weights))
         q = len(pending_updates)
         logger.info(
-            f"[Update] ACCEPT [{client_id}] — queue {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}"
+            f"[Update] ACCEPT [{client_id}] wallet={wallet_address or 'n/a'} "
+            f"— queue {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}"
         )
-
         if q >= runtime_cfg.MIN_AGGREGATE_SIZE:
             batch = list(pending_updates)
             pending_updates.clear()
             background_tasks.add_task(_run_aggregation_sync, batch)
 
-    return {"status": "ACCEPT", "message": "Update queued for aggregation."}
+    return {
+        "status":            "ACCEPTED",
+        "reason":           "Update queued for aggregation.",
+        "new_model_version": current_version_num,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -633,25 +882,55 @@ async def get_status():
     }
 
 
+@app.get("/round-status")
+async def get_round_status():
+    """Round coordination endpoint (Segment 6).
+    Clients call this before training to check if the server is ready
+    and to learn the current model version they must train on.
+    """
+    async with model_lock:
+        active_clients = [cid for cid, _ in pending_updates]
+        received       = len(pending_updates)
+
+    return {
+        "current_version":  current_version_num,
+        "required_updates": runtime_cfg.MIN_AGGREGATE_SIZE,
+        "received_updates": received,
+        "active_clients":   active_clients,
+        "round_active":     global_model is not None,
+    }
+
+
 @app.get("/clients")
 async def get_clients():
     """Recent client update attempts for the dashboard.
+    Joins client_updates with clients table to resolve UUID → human-readable name.
     Falls back to in-memory list when Supabase is unavailable or tables are empty.
     """
     db_rows: List[Dict] = []
 
     if storage:
         try:
+            # Join clients to get readable names instead of UUIDs
             rows = (
                 storage.supabase.table("client_updates")
-                .select("*")
+                .select("id,version_id,status,norm_value,distance_value,reason,created_at,clients(client_name)")
                 .order("created_at", desc=True)
                 .limit(50)
                 .execute()
             )
-            db_rows = rows.data or []
+            uid_to_name = {v: k for k, v in storage._client_id_cache.items()}
+            for row in (rows.data or []):
+                row = dict(row)
+                # Supabase join returns nested {"clients": {"client_name": "..."}} or None
+                nested = row.pop("clients", None)
+                if nested and isinstance(nested, dict) and nested.get("client_name"):
+                    row["client_id"] = nested["client_name"]
+                elif row.get("client_id") in uid_to_name:
+                    row["client_id"] = uid_to_name[row["client_id"]]
+                db_rows.append(row)
         except Exception as exc:
-            logger.error(f"Failed to fetch clients from DB: {exc}")
+            logger.warning(f"[Clients] Supabase read failed: {exc}")
 
     # Fall back to in-memory when DB is empty / unavailable
     if not db_rows and _mem_client_updates:
@@ -1204,3 +1483,8 @@ async def get_client_weights(client_id: str):
             media_type="application/octet-stream",
         )
     raise HTTPException(404, "Weights not found — training may still be in progress.")
+
+
+from server.collab import collab_router
+app.include_router(collab_router, prefix="/collab", tags=["collaboration"])
+

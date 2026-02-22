@@ -8,8 +8,10 @@ import {
     Users,
     Network,
     LineChart,
-    TerminalSquare
+    TerminalSquare,
+    Users2
 } from "lucide-react";
+import { supabase } from "@/lib/supabaseClient";
 
 export function Sidebar() {
     const pathname = usePathname();
@@ -18,11 +20,13 @@ export function Sidebar() {
         { name: "Overview", href: "/dashboard", icon: LayoutDashboard },
         { name: "Clients", href: "/dashboard/clients", icon: Users },
         { name: "Models", href: "/dashboard/models", icon: Network },
+        { name: "Collaborate", href: "/dashboard/collaborate", icon: Users2 },
         { name: "Evaluation", href: "/dashboard/evaluation", icon: LineChart },
         { name: "Logs", href: "/dashboard/logs", icon: TerminalSquare },
     ];
 
     const [escrowBalance, setEscrowBalance] = useState<number>(0);
+    const [pendingInvites, setPendingInvites] = useState<number>(0);
 
     useEffect(() => {
         const fetchTokens = async () => {
@@ -43,7 +47,24 @@ export function Sidebar() {
         };
         fetchTokens();
         const interval = setInterval(fetchTokens, 5000);
-        return () => clearInterval(interval);
+
+        // Fetch initial pending invites
+        const fetchInvites = async () => {
+            const res = await supabase.from('collab_sessions').select('id', { count: 'exact' }).eq('recipient_id', 1).eq('status', 'pending');
+            setPendingInvites(res.count || 0);
+        };
+        fetchInvites();
+
+        // Listen for new invites
+        const channel = supabase.channel('sidebar-collab')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'collab_sessions', filter: 'recipient_id=eq.1' }, () => {
+                fetchInvites();
+            }).subscribe();
+
+        return () => {
+            clearInterval(interval);
+            supabase.removeChannel(channel);
+        };
     }, []);
 
     return (
@@ -75,7 +96,14 @@ export function Sidebar() {
                                 <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-blue-600 rounded-r-full" />
                             )}
                             <link.icon className={`w-5 h-5 ${isActive ? "text-blue-600" : "text-slate-400 group-hover:text-slate-600"}`} />
-                            {link.name}
+                            <span className="flex-1">{link.name}</span>
+
+                            {/* Notification Badge for Collaborate */}
+                            {link.name === "Collaborate" && pendingInvites > 0 && (
+                                <span className="bg-amber-400 text-amber-900 font-bold text-[10px] px-2 py-0.5 rounded-full shadow-sm animate-pulse">
+                                    {pendingInvites}
+                                </span>
+                            )}
                         </Link>
                     );
                 })}

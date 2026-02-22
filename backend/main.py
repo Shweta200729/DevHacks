@@ -119,6 +119,14 @@ import sys as _sys, os as _os
 
 _sys.path.insert(0, _os.path.abspath(_os.path.dirname(__file__)))
 
-from server.main import app as fl_app  # noqa: E402
+from server.main import app as fl_app, init_fl_state  # noqa: E402
 
 app.mount("/fl", fl_app)
+
+
+@app.on_event("startup")
+async def _root_startup():
+    """Root app startup: initialises the FL sub-app state.
+    Necessary because mounted sub-apps do NOT fire their own on_startup events.
+    """
+    await init_fl_state()
