@@ -14,15 +14,29 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 
 export default function CollaboratePage() {
-    // We mock a logged-in user for this demo. Normally extracted from JWT.
-    // For DevHacks, we'll act as User 1 if no context is found, but normally this would be dynamic.
-    const [currentUserId, setCurrentUserId] = useState<number>(1);
+    // Read the logged-in user dynamically from localStorage instead of hardcoding it
+    const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+
+    useEffect(() => {
+        const stored = localStorage.getItem("user");
+        if (stored) {
+            try {
+                const userObj = JSON.parse(stored);
+                if (userObj && userObj.id) {
+                    setCurrentUserId(userObj.id);
+                }
+            } catch (e) {
+                console.error("Failed to parse user session", e);
+            }
+        }
+    }, []);
 
     const [allUsers, setAllUsers] = useState<CollabUser[]>([]);
     const [sessions, setSessions] = useState<CollabSession[]>([]);
     const [search, setSearch] = useState("");
 
     const loadData = useCallback(async () => {
+        if (!currentUserId) return;
         const [u, s] = await Promise.all([
             fetchCollabUsers(),
             fetchMyCollabSessions(currentUserId),
@@ -50,11 +64,13 @@ export default function CollaboratePage() {
 
 
     const handleRequest = async (toUserId: number) => {
+        if (!currentUserId) return;
         await sendCollabRequest(currentUserId, toUserId, "Let's train together!");
         await loadData();
     };
 
     const handleRespond = async (sessionId: string, action: "accept" | "reject" | "cancel") => {
+        if (!currentUserId) return;
         await respondToCollabRequest(currentUserId, sessionId, action);
         await loadData();
     };
