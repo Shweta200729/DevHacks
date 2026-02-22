@@ -317,24 +317,18 @@ async def init_fl_state() -> None:
     else:
         logger.info("No model built — waiting for client dataset upload.")
 
-    # ── 4. Restore checkpoint from DB ────────────────────────────────────────
+    # ── 4. Restore checkpoint from Supabase Storage ──────────────────────────
     if storage and global_model:
         latest = storage.get_latest_version()
-        if (
-            latest["version_num"] > 0
-            and latest["file_path"]
-            and os.path.exists(latest["file_path"])
-        ):
+        if latest["version_num"] > 0 and latest["file_path"]:
             try:
-                ckpt = torch.load(
-                    latest["file_path"], weights_only=True, map_location="cpu"
-                )
+                ckpt = storage.download_model(latest["file_path"])
                 global_model.set_weights(ckpt)
                 current_version_num = latest["version_num"]
                 current_version_id = latest["id"]
-                logger.info(f"Restored checkpoint: Version {current_version_num}")
+                logger.info(f"Restored checkpoint from Supabase: Version {current_version_num}")
             except Exception as exc:
-                logger.warning(f"Checkpoint load failed ({exc}). Starting fresh.")
+                logger.warning(f"Checkpoint load from Supabase failed ({exc}). Starting fresh.")
                 await _init_fresh_model()
         else:
             await _init_fresh_model()
@@ -605,20 +599,22 @@ async def _run_aggregation_collab_async(batch: List[Tuple], session_id: str):
     import time
 
     rnd_ver = int(time.time() * 1000) % 2147483647
-    file_path = f"collab_model_{rnd_ver}.pt"
-    torch.save(new_weights, file_path)
 
     if storage:
         try:
-            # Create a model version
+            # Upload to Supabase Storage — no local disk write
+            file_name = storage.upload_model(new_weights, rnd_ver)
+
+            # Create a model version row with the bucket key
             vr = (
                 storage.supabase.table("model_versions")
-                .insert({"version_num": rnd_ver, "file_path": file_path})
+                .insert({"version_num": rnd_ver, "file_path": file_name})
                 .execute()
             )
             new_v_id = vr.data[0]["id"]
 
             # Update the specific collaboration session pointer
+            import datetime as _dt
             storage.supabase.table("collab_sessions").update(
                 {
                     "shared_version_id": new_v_id,
@@ -672,8 +668,15 @@ async def get_global_model(session_id: Optional[str] = None):
                     if (vr.data and "file_path" in vr.data)
                     else None
                 )
-                if fp and os.path.exists(fp):
-                    weights = torch.load(fp, weights_only=True, map_location="cpu")
+                # Download from Supabase Storage (bucket key, not local path)
+                if fp:
+                    try:
+                        weights = storage.download_model(fp)
+                    except Exception as dl_e:
+                        logger.warning(
+                            f"[Model] Collab download failed ({dl_e}) — "
+                            "falling back to global model."
+                        )
         except Exception as e:
             logger.error(f"[Model] Could not get collab weights for {session_id}: {e}")
 
@@ -1116,33 +1119,150 @@ async def get_train_metrics():
 
 @app.get("/model/download")
 async def download_global_model(version_id: str = None):
-    """Download a specific (or latest) global model checkpoint."""
-    if not storage:
-        raise HTTPException(500, "Storage uninitialized.")
-    try:
-        if version_id:
-            row = (
+    """Download a specific (or latest) global model checkpoint from Supabase Storage.
+
+    Strategy:
+      1. If version_id is given, look up that DB row.
+         a. If file_path is a valid bucket key  → download from Storage.
+         b. If file_path is a legacy local path → try to read the .pt file
+            from disk, upload it to the bucket on-the-fly, update the DB row,
+            then stream it back.
+      2. If no version_id (latest) → use get_latest_version() which already
+         skips legacy local-path rows and returns file_path=None when none
+         exist; fall through to in-memory model.
+      3. Final fallback: stream the in-memory global model.
+    """
+    from server.storage import _is_bucket_key  # already imported in storage module
+
+    _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def _find_local_pt(raw_path: str) -> str | None:
+        """Resolve a raw DB file_path to a real local file path."""
+        normalised = raw_path.replace("\\", "/").lstrip("/")
+        candidate = os.path.join(_BACKEND_DIR, normalised)
+        if os.path.isfile(candidate):
+            return candidate
+        # Also try fl_simulation_data/models/<basename> directly
+        basename = os.path.basename(normalised)
+        fallback = os.path.join(_BACKEND_DIR, "fl_simulation_data", "models", basename)
+        if os.path.isfile(fallback):
+            return fallback
+        return None
+
+    def _migrate_and_stream(row_id: str, raw_path: str, version_num: int):
+        """Read .pt from disk, upload to bucket, update DB, return (buf, filename)."""
+        local_pt = _find_local_pt(raw_path)
+        if not local_pt:
+            return None, None
+        bucket_key = f"global_model_v{version_num}.pt"
+        with open(local_pt, "rb") as fh:
+            raw_bytes = fh.read()
+        try:
+            storage.supabase.storage.from_("fl-models").upload(
+                path=bucket_key,
+                file=raw_bytes,
+                file_options={"content-type": "application/octet-stream", "upsert": "true"},
+            )
+            storage.supabase.table("model_versions").update(
+                {"file_path": bucket_key}
+            ).eq("id", row_id).execute()
+            logger.info(f"[Download] Migrated '{raw_path}' → bucket key '{bucket_key}'")
+        except Exception as up_exc:
+            logger.warning(f"[Download] On-the-fly bucket upload failed ({up_exc}); serving from disk.")
+        buf = io.BytesIO(raw_bytes)
+        return buf, bucket_key
+
+    # ── Specific version requested ────────────────────────────────────────────
+    if version_id and storage:
+        try:
+            row_res = (
                 storage.supabase.table("model_versions")
-                .select("file_path")
+                .select("id, version_num, file_path")
                 .eq("id", version_id)
                 .single()
                 .execute()
             )
-            file_path = row.data.get("file_path") if row.data else None
-        else:
-            file_path = storage.get_latest_version().get("file_path")
+            row_data = row_res.data
+            if not row_data:
+                raise HTTPException(404, f"Version '{version_id}' not found.")
 
-        if file_path and os.path.exists(file_path):
-            return FileResponse(
-                path=file_path,
-                filename=os.path.basename(file_path),
+            file_name = row_data.get("file_path") or ""
+            v_num = row_data.get("version_num", 0)
+
+            if _is_bucket_key(file_name):
+                # ✅ Valid bucket key — download normally
+                try:
+                    state_dict = storage.download_model(file_name)
+                    buf = io.BytesIO()
+                    torch.save(state_dict, buf)
+                    buf.seek(0)
+                    return StreamingResponse(
+                        buf,
+                        media_type="application/octet-stream",
+                        headers={"Content-Disposition": f"attachment; filename={file_name}"},
+                    )
+                except Exception as dl_exc:
+                    logger.warning(f"[Download] Bucket download failed: {dl_exc}")
+                    # Fall through to disk/memory fallback
+            else:
+                # ⚠️  Legacy local path — try on-the-fly migration
+                buf, bucket_key = _migrate_and_stream(row_data["id"], file_name, v_num)
+                if buf is not None:
+                    return StreamingResponse(
+                        buf,
+                        media_type="application/octet-stream",
+                        headers={"Content-Disposition": f"attachment; filename={bucket_key or os.path.basename(file_name)}"},
+                    )
+                logger.warning(f"[Download] Legacy path '{file_name}' not found on disk either.")
+                # Fall through to in-memory fallback
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning(f"[Download] Specific version lookup failed: {exc}")
+            # Fall through to in-memory fallback
+
+    # ── Latest version (no version_id) ───────────────────────────────────────
+    elif storage:
+        try:
+            latest = storage.get_latest_version()  # already skips legacy paths
+            file_name = latest.get("file_path")
+            if file_name and _is_bucket_key(file_name):
+                try:
+                    state_dict = storage.download_model(file_name)
+                    buf = io.BytesIO()
+                    torch.save(state_dict, buf)
+                    buf.seek(0)
+                    return StreamingResponse(
+                        buf,
+                        media_type="application/octet-stream",
+                        headers={"Content-Disposition": f"attachment; filename={file_name}"},
+                    )
+                except Exception as dl_exc:
+                    logger.warning(f"[Download] Latest bucket download failed: {dl_exc}")
+        except Exception as exc:
+            logger.warning(f"[Download] Latest version lookup failed: {exc}")
+
+    # ── Final fallback: in-memory global model ────────────────────────────────
+    if global_model:
+        try:
+            async with model_lock:
+                weights = global_model.get_weights()
+            buf = io.BytesIO()
+            torch.save(weights, buf)
+            buf.seek(0)
+            logger.info("[Download] Serving in-memory global model as fallback.")
+            return StreamingResponse(
+                buf,
                 media_type="application/octet-stream",
+                headers={"Content-Disposition": "attachment; filename=global_model_current.pt"},
             )
-        raise HTTPException(404, "Model file not found on disk.")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Download error: {exc}")
+        except Exception as mm_exc:
+            logger.error(f"[Download] In-memory fallback failed: {mm_exc}")
+
+    raise HTTPException(
+        404,
+        "No model checkpoint available yet. Upload a dataset or run a simulation first.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1666,18 +1786,48 @@ async def upload_dataset(
 
 @app.get("/api/model/weights/{client_id}")
 async def get_client_weights(client_id: str):
-    """Download the locally-trained .pt file for a specific client."""
-    client_dir = os.path.join(
-        os.path.abspath(os.path.dirname(__file__)), "..", "data", f"client_{client_id}"
-    )
-    weights_path = os.path.join(client_dir, f"weights_{client_id}.pt")
-    if os.path.exists(weights_path):
-        return FileResponse(
-            weights_path,
-            filename=f"weights_{client_id}.pt",
-            media_type="application/octet-stream",
+    """Download the latest global model weights from Supabase Storage.
+
+    Returns the current global model checkpoint — accessible from any machine.
+    Falls back to in-memory global model if no checkpoint exists in the bucket.
+    """
+    if not storage:
+        raise HTTPException(500, "Storage uninitialized.")
+
+    # Try to fetch the latest version from Supabase Storage
+    try:
+        latest = storage.get_latest_version()
+        if latest["file_path"]:
+            state_dict = storage.download_model(latest["file_path"])
+            buf = io.BytesIO()
+            torch.save(state_dict, buf)
+            buf.seek(0)
+            return StreamingResponse(
+                buf,
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename=global_model_v{latest['version_num']}.pt"
+                },
+            )
+    except Exception as exc:
+        logger.warning(
+            f"[Weights] Supabase download failed ({exc}) — falling back to in-memory model."
         )
-    raise HTTPException(404, "Weights not found — training may still be in progress.")
+
+    # Fallback: stream the in-memory global model directly
+    if global_model:
+        async with model_lock:
+            weights = global_model.get_weights()
+        buf = io.BytesIO()
+        torch.save(weights, buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment; filename=global_model_current.pt"},
+        )
+
+    raise HTTPException(404, "No model available — upload a dataset first.")
 
 
 from server.collab import collab_router
