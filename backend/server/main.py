@@ -72,20 +72,32 @@ try:
         get_all_status,
         get_recent_transactions,
     )
+
     _BLOCKCHAIN_AVAILABLE = True
 except Exception as _bc_err:
     import logging as _log
+
     _log.getLogger(__name__).warning(
         f"[Blockchain] Import failed ({_bc_err}) — using no-op stubs. "
         "Token economy features will be disabled."
     )
     _BLOCKCHAIN_AVAILABLE = False
 
-    def get_or_create_wallet(client_id: str) -> str:      return ""
-    def reward_client(client_id: str, amount: int = 10):  return None
-    def slash_client(client_id: str, amount: int = 15):   return None
-    def get_all_status() -> list:                         return []
-    def get_recent_transactions() -> list:                return []
+    def get_or_create_wallet(client_id: str) -> str:
+        return ""
+
+    def reward_client(client_id: str, amount: int = 10):
+        return None
+
+    def slash_client(client_id: str, amount: int = 15):
+        return None
+
+    def get_all_status() -> list:
+        return []
+
+    def get_recent_transactions() -> list:
+        return []
+
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 from experiments.evaluation import evaluate_model
@@ -153,15 +165,18 @@ def _mem_log_client_update(
     Used as fallback when Supabase is unavailable or tables don't exist yet.
     """
     import datetime as _dt
-    _mem_client_updates.append({
-        "id": str(len(_mem_client_updates) + 1),
-        "client_id": display_name,          # human-readable name, not UUID
-        "status": status,
-        "norm_value": _safe_float(norm_val),
-        "distance_value": _safe_float(dist_val),
-        "reason": reason,
-        "created_at": _dt.datetime.utcnow().isoformat() + "Z",
-    })
+
+    _mem_client_updates.append(
+        {
+            "id": str(len(_mem_client_updates) + 1),
+            "client_id": display_name,  # human-readable name, not UUID
+            "status": status,
+            "norm_value": _safe_float(norm_val),
+            "distance_value": _safe_float(dist_val),
+            "reason": reason,
+            "created_at": _dt.datetime.utcnow().isoformat() + "Z",
+        }
+    )
     # Keep only last 100 entries
     if len(_mem_client_updates) > 100:
         _mem_client_updates.pop(0)
@@ -171,6 +186,7 @@ def _safe_float(v: float, fallback: float = 0.0) -> Optional[float]:
     """Return None for non-finite floats so JSON serialization never crashes.
     PyTorch training can produce inf/nan in early rounds."""
     import math as _m
+
     if v is None:
         return None
     try:
@@ -351,15 +367,18 @@ async def _aggregate_and_update(updates: List[Tuple[str, Dict]]) -> Dict[str, fl
 
     # ── Always accumulate in-memory (Supabase is secondary) ──────────────────
     import datetime as _dt
+
     _now_iso = _dt.datetime.utcnow().isoformat() + "Z"
-    _mem_aggregations.append({
-        "id": len(_mem_aggregations) + 1,
-        "version_id": current_version_num,
-        "method": method_name,
-        "total_accepted": n,
-        "total_rejected": 0,
-        "created_at": _now_iso,
-    })
+    _mem_aggregations.append(
+        {
+            "id": len(_mem_aggregations) + 1,
+            "version_id": current_version_num,
+            "method": method_name,
+            "total_accepted": n,
+            "total_rejected": 0,
+            "created_at": _now_iso,
+        }
+    )
     # Keep only last 50 rounds in memory
     if len(_mem_aggregations) > 50:
         _mem_aggregations.pop(0)
@@ -369,38 +388,47 @@ async def _aggregate_and_update(updates: List[Tuple[str, Dict]]) -> Dict[str, fl
         _safe_loss = _safe_float(eval_metrics.get("loss"))
         # Skip entirely if both values are non-finite (useless data point)
         if _safe_acc is not None or _safe_loss is not None:
-            _mem_evaluations.append({
-                "id": len(_mem_evaluations) + 1,
-                "version_id": current_version_num,
-                "accuracy": _safe_acc,
-                "loss": _safe_loss,
-                "created_at": _now_iso,
-            })
+            _mem_evaluations.append(
+                {
+                    "id": len(_mem_evaluations) + 1,
+                    "version_id": current_version_num,
+                    "accuracy": _safe_acc,
+                    "loss": _safe_loss,
+                    "created_at": _now_iso,
+                }
+            )
     else:
         # Synthesize proxy metrics so the chart is never blank
         import math as _math
+
         v = current_version_num
         proxy_acc = round(min(0.99, 0.45 + 0.08 * _math.log1p(v)), 4)
         proxy_loss = round(max(0.05, 2.5 / (1.0 + _math.log1p(v))), 4)
-        _mem_evaluations.append({
-            "id": len(_mem_evaluations) + 1,
-            "version_id": v,
-            "accuracy": proxy_acc,
-            "loss": proxy_loss,
-            "created_at": _now_iso,
-            "_synthesized": True,
-        })
-        logger.info(f"[Aggregation] Proxy eval appended in-memory: acc={proxy_acc}, loss={proxy_loss}")
+        _mem_evaluations.append(
+            {
+                "id": len(_mem_evaluations) + 1,
+                "version_id": v,
+                "accuracy": proxy_acc,
+                "loss": proxy_loss,
+                "created_at": _now_iso,
+                "_synthesized": True,
+            }
+        )
+        logger.info(
+            f"[Aggregation] Proxy eval appended in-memory: acc={proxy_acc}, loss={proxy_loss}"
+        )
     if len(_mem_evaluations) > 50:
         _mem_evaluations.pop(0)
 
     # Always accumulate version in-memory
-    _mem_versions.append({
-        "id": str(current_version_num),
-        "version_num": current_version_num,
-        "file_path": None,
-        "created_at": _dt.datetime.utcnow().isoformat() + "Z",
-    })
+    _mem_versions.append(
+        {
+            "id": str(current_version_num),
+            "version_num": current_version_num,
+            "file_path": None,
+            "created_at": _dt.datetime.utcnow().isoformat() + "Z",
+        }
+    )
     if len(_mem_versions) > 50:
         _mem_versions.pop(0)
 
@@ -499,7 +527,9 @@ async def receive_update(
             logger.warning(f"DB log failed for {client_id}: {db_err}")
 
     # Always log in-memory (Supabase is secondary)
-    _mem_log_client_update(client_id, status, norm_val, dist_val, reason, version_id=curr_vid)
+    _mem_log_client_update(
+        client_id, status, norm_val, dist_val, reason, version_id=curr_vid
+    )
 
     # Register/Stake in the blockchain economy
     get_or_create_wallet(client_id)
@@ -565,7 +595,9 @@ async def get_metrics():
             eval_rows = evals.data or []
             agg_rows = aggs.data or []
         except Exception as db_exc:
-            logger.warning(f"[Metrics] Supabase read failed: {db_exc} — using in-memory cache")
+            logger.warning(
+                f"[Metrics] Supabase read failed: {db_exc} — using in-memory cache"
+            )
 
     # ── 2. Fall back to in-memory when DB is empty / unavailable ─────────────
     if not agg_rows and _mem_aggregations:
@@ -664,17 +696,20 @@ async def get_train_metrics():
     chart_data = []
     for r in sorted(rounds.keys()):
         for ep in sorted(rounds[r], key=lambda x: x["epoch"]):
-            chart_data.append({
-                "label": f"R{r}E{ep['epoch']}",
-                "round": r,
-                "epoch": ep["epoch"],
-                "loss": ep["loss"],
-                "accuracy": ep["accuracy"],
-                "client_id": ep.get("client_id", ""),
-                "created_at": ep.get("created_at", ""),
-            })
+            chart_data.append(
+                {
+                    "label": f"R{r}E{ep['epoch']}",
+                    "round": r,
+                    "epoch": ep["epoch"],
+                    "loss": ep["loss"],
+                    "accuracy": ep["accuracy"],
+                    "client_id": ep.get("client_id", ""),
+                    "created_at": ep.get("created_at", ""),
+                }
+            )
 
     return {"data": chart_data, "total_epochs": len(chart_data)}
+
 
 @app.get("/model/download")
 async def download_global_model(version_id: str = None):
@@ -818,6 +853,53 @@ async def _enqueue_and_aggregate(client_id: str, weights: Dict[str, torch.Tensor
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Network visualizer endpoint (per-client aggregated summary)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/network")
+async def get_network():
+    """Aggregated per-client summary for the force-graph network visualizer.
+    Returns client nodes with accept/reject counts and last norm/distance,
+    plus global aggregation_count and dp_enabled flag.
+    """
+    # Use in-memory client updates (always populated)
+    raw = list(_mem_client_updates)
+
+    # Group by client_id
+    client_map: Dict[str, Dict] = {}
+    for entry in raw:
+        cid = entry.get("client_id", "unknown")
+        if cid not in client_map:
+            client_map[cid] = {
+                "client_id": cid,
+                "total_updates": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "last_status": "PENDING",
+                "last_norm": 0.0,
+                "last_distance": 0.0,
+            }
+        node = client_map[cid]
+        node["total_updates"] += 1
+        st = entry.get("status", "")
+        if st == "ACCEPT":
+            node["accepted"] += 1
+        elif st == "REJECT":
+            node["rejected"] += 1
+        # Always overwrite with the latest values
+        node["last_status"] = st
+        node["last_norm"] = entry.get("norm_value", 0.0)
+        node["last_distance"] = entry.get("distance_value", 0.0)
+
+    return {
+        "clients": list(client_map.values()),
+        "aggregation_count": len(_mem_aggregations),
+        "dp_enabled": runtime_cfg.DP_ENABLED,
+    }
+
+
 class ToggleDPRequest(BaseModel):
     dp_enabled: bool
 
@@ -848,14 +930,14 @@ async def get_config():
     }
 
 
-
 @app.get("/blockchain/status")
 async def get_blockchain_economy_status():
     """Live web3 economy stats for real-time dashboard UI."""
     return {
         "wallets": get_all_status(),
-        "recent_transactions": get_recent_transactions()
+        "recent_transactions": get_recent_transactions(),
     }
+
 
 @app.post("/admin/config")
 async def set_config(update: ConfigUpdate):
@@ -1011,18 +1093,22 @@ def _train_client_background(client_id: str, file_path: str):
         # Store per-epoch training history in-memory (for dashboard Training section)
         if epoch_metrics:
             import datetime as _dt2
+
             _round_ts = _dt2.datetime.utcnow().isoformat() + "Z"
             for em in epoch_metrics:
-                _mem_train_history.append({
-                    "client_id": client_id,
-                    "round": current_version_num + 1,   # +1: training precedes aggregation
-                    "epoch": em["epoch"],
-                    "loss": _safe_float(em["loss"]),
-                    "accuracy": _safe_float(em["accuracy"]),
-                    "created_at": _round_ts,
-                })
+                _mem_train_history.append(
+                    {
+                        "client_id": client_id,
+                        "round": current_version_num
+                        + 1,  # +1: training precedes aggregation
+                        "epoch": em["epoch"],
+                        "loss": _safe_float(em["loss"]),
+                        "accuracy": _safe_float(em["accuracy"]),
+                        "created_at": _round_ts,
+                    }
+                )
             if len(_mem_train_history) > 300:
-                del _mem_train_history[:len(_mem_train_history) - 300]
+                del _mem_train_history[: len(_mem_train_history) - 300]
 
         if not saved_path:
             logger.warning(f"[BG Train] ⚠️ No weights produced for {client_id}")

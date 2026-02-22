@@ -7,6 +7,7 @@ import {
     LayoutDashboard,
     Users,
     Network,
+    Waypoints,
     LineChart,
     TerminalSquare
 } from "lucide-react";
@@ -17,6 +18,7 @@ export function Sidebar() {
     const links = [
         { name: "Overview", href: "/dashboard", icon: LayoutDashboard },
         { name: "Clients", href: "/dashboard/clients", icon: Users },
+        { name: "Network", href: "/dashboard/network", icon: Waypoints },
         { name: "Models", href: "/dashboard/models", icon: Network },
         { name: "Evaluation", href: "/dashboard/evaluation", icon: LineChart },
         { name: "Logs", href: "/dashboard/logs", icon: TerminalSquare },
@@ -30,7 +32,7 @@ export function Sidebar() {
                 const res = await fetch("http://localhost:8000/fl/clients");
                 if (res.ok) {
                     const json = await res.json();
-                    let total = 50000; // Starting protocol escrow pool
+                    let total = 0;
                     json.data?.forEach((c: any) => {
                         if (c.status === "ACCEPT") total += 10;
                         else total -= 15;
@@ -38,7 +40,7 @@ export function Sidebar() {
                     setEscrowBalance(total);
                 }
             } catch (e) {
-                setEscrowBalance(50000);
+                setEscrowBalance(0);
             }
         };
         fetchTokens();
