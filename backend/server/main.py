@@ -163,6 +163,7 @@ runtime_cfg: FLSettings = cfg  # replaced by ConfigUpdate POST
 
 current_version_id: Optional[str] = None
 current_version_num: int = 0
+main_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # ── In-memory metric accumulators ────────────────────────────────────────────
 # These mirror what is written to Supabase so that the dashboard always has
@@ -266,7 +267,12 @@ async def init_fl_state() -> None:
     """Full server initialisation: Storage → Dataset → Model → Checkpoint → Warm-up.
     Call this from whichever startup hook actually fires.
     """
-    global storage, global_model, val_loader, current_version_id, current_version_num
+    global storage, global_model, val_loader, current_version_id, current_version_num, main_event_loop
+
+    try:
+        main_event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
 
     # -- 1. Storage --------------------------------------------------------
     _sb_url = os.environ.get("SUPABASE", "")
@@ -1698,46 +1704,67 @@ def _train_client_background(
         )
         logger.info(f"[BG Train] Val loader built: {n_val} samples.")
 
-        if global_model is None:
-            # Build model from scratch using detected CSV shape
-            side = int(_math.isqrt(num_features))
-            is_image = side * side == num_features and side >= 8
-            input_shape = (1, side, side) if is_image else (num_features,)
+        # Always build model from scratch using detected CSV shape
+        side = int(_math.isqrt(num_features))
+        is_image = side * side == num_features and side >= 8
+        input_shape = (1, side, side) if is_image else (num_features,)
 
-            new_model = build_model(
-                input_shape=input_shape,
-                num_classes=num_classes_csv,
-                hidden_dims=cfg.hidden_dims(),
-            )
-            logger.info(f"[BG Train] Built global model from CSV: {new_model}")
+        new_model = build_model(
+            input_shape=input_shape,
+            num_classes=num_classes_csv,
+            hidden_dims=cfg.hidden_dims(),
+        )
+        logger.info(f"[BG Train] CSV target model: {new_model}")
 
-            # Thread-safe: use a fresh sync event loop to assign under model_lock
-            def _set_globals():
-                async def _inner():
-                    async with model_lock:
-                        global global_model, val_loader
-                        global_model = new_model
-                        val_loader = new_val_loader
-
+        # Thread-safe assignment
+        def _set_globals(model_to_set, loader_to_set):
+            async def _inner():
+                async with model_lock:
+                    global global_model, val_loader
+                    global_model = model_to_set
+                    val_loader = loader_to_set
+            
+            if main_event_loop and main_event_loop.is_running():
+                asyncio.run_coroutine_threadsafe(_inner(), main_event_loop).result()
+            else:
                 asyncio.run(_inner())
 
-            _set_globals()
-
+        if global_model is None:
+            logger.info("[BG Train] Global model is None, setting to CSV target model.")
+            _set_globals(new_model, new_val_loader)
+            
             if storage:
-                # Save initial version — must use sync loop separate from main
+                # Save initial version
                 def _save_init():
-                    loop = asyncio.new_event_loop()
-                    try:
-                        loop.run_until_complete(_init_fresh_model())
-                    finally:
-                        loop.close()
+                    async def _inner():
+                        await _init_fresh_model()
+                    
+                    if main_event_loop and main_event_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(_inner(), main_event_loop).result()
+                    else:
+                        asyncio.run(_inner())
 
                 _save_init()
         else:
-            # Global model already exists — just update val_loader (no lock needed
-            # since writes to a module-level reference are GIL-protected in CPython)
-            val_loader = new_val_loader
-            logger.info("[BG Train] Updated global val_loader from CSV.")
+            # Check compatibility: if key shapes don't match, we must overwrite the global model
+            current_keys = global_model.get_weights()
+            new_keys = new_model.state_dict()
+            mismatch = False
+            
+            if current_keys.keys() != new_keys.keys():
+                mismatch = True
+            else:
+                for k in current_keys:
+                    if current_keys[k].shape != new_keys[k].shape:
+                        mismatch = True
+                        break
+            
+            if mismatch:
+                logger.warning("[BG Train] Arch mismatch detected (e.g., CSV vs default MNIST). Overwriting global_model.")
+                _set_globals(new_model, new_val_loader)
+            else:
+                logger.info("[BG Train] Arch matches. Updated global val_loader from CSV.")
+                _set_globals(global_model, new_val_loader)
 
         # ── Step 3: Get current or specific weights ───────────────
         gw = None
@@ -1869,10 +1896,42 @@ def _train_client_background(
                 f"[BG Train] ℹ️  Detection flagged weights ({reason}) — "
                 f"proceeding with aggregation anyway (server-side training is trusted)."
             )
-        else:
-            logger.info(f"[BG Train] ✅ Detection passed — running aggregation.")
-
-        _run_aggregation_sync([(client_id, client_weights)])
+        # The previous background queue processing was deadlocking uvicorn 
+        # by missing the main loop's async context.
+        # We need to dispatch the aggregation check back to the main event loop
+        # using a simple non-blocking async function and create a task for it.
+        
+        async def _check_and_aggregate():
+            async with model_lock:
+                pending_updates.append((client_id, client_weights))
+                q = len(pending_updates)
+                logger.info(f"[BG Train] Queue: {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}")
+                
+                if q >= runtime_cfg.MIN_AGGREGATE_SIZE:
+                    batch = list(pending_updates)
+                    pending_updates.clear()
+                    # Await actual aggregation inside the lock
+                    await _aggregate_and_update(batch)
+        
+        # Fire and forget back onto the main event loop
+        try:
+            if main_event_loop is not None and main_event_loop.is_running():
+                # We do NOT await future.result() here because this runs in a Starlette AnyIO worker thread
+                # and blocking here while waiting for the main loop to process the lock will deadlock it.
+                future = asyncio.run_coroutine_threadsafe(_check_and_aggregate(), main_event_loop)
+                
+                def _on_done(f):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error(f"[BG Train] ❌ Aggregation trigger failed: {e}", exc_info=True)
+                
+                future.add_done_callback(_on_done)
+            else:
+                # Fallback if no main loop exists (e.g. tests)
+                asyncio.run(_check_and_aggregate())
+        except Exception as agg_err:
+            logger.error(f"[BG Train] ❌ Failed to schedule aggregation: {agg_err}", exc_info=True)
 
         logger.info(f"[BG Train] ✅ Complete for {client_id}")
 

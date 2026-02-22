@@ -110,7 +110,20 @@ export default function ClientsPage() {
 
     const refreshTrainingStatus = useCallback(async () => {
         const s = await fetchTrainingStatus();
-        if (s) setTrainingStatus(s);
+        if (s) {
+            setTrainingStatus(prev => {
+                // If a new round completed, refresh the models list
+                if (prev && s.current_version !== prev.current_version) {
+                    fetchVersions().then(versions => {
+                        if (versions && versions.length > 0) {
+                            setModelVersions(versions);
+                            setSelectedVersionId(String(versions[0].id));
+                        }
+                    });
+                }
+                return s;
+            });
+        }
     }, []);
 
     // ── Simulation handler ────────────────────────────────────────────────────

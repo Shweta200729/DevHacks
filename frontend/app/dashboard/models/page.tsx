@@ -9,11 +9,13 @@ export default function ModelsPage() {
     const [evalMap, setEvalMap] = useState<Record<string, EvalRow>>({});
     const [aggMap, setAggMap] = useState<Record<string, AggRow>>({});
     const [downloading, setDownloading] = useState<string | null>(null);
+    const [currentVersion, setCurrentVersion] = useState<number>(0);
 
     const load = useCallback(async () => {
         const [metrics, vers] = await Promise.all([fetchMetrics(), fetchVersions()]);
 
         if (metrics) {
+            setCurrentVersion(metrics.current_version);
             const em: Record<string, EvalRow> = {};
             metrics.evaluations.forEach(e => { em[String(e.version_id)] = e; });
             const am: Record<string, AggRow> = {};
@@ -81,7 +83,7 @@ export default function ModelsPage() {
                                     // Note: we fall back to version_num if it doesn't match by ID, to handle legacy mock endpoints
                                     const ev = evalMap[v.id] || evalMap[String(v.version_num)];
                                     const ag = aggMap[v.id] || aggMap[String(v.version_num)];
-                                    const isCurrent = i === 0;
+                                    const isCurrent = v.version_num === currentVersion;
                                     return (
                                         <tr key={v.id} className={`group transition-colors ${isCurrent ? "bg-blue-50/30 hover:bg-blue-50" : "hover:bg-slate-50"}`}>
                                             <td className="px-6 py-4">
