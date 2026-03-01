@@ -8,7 +8,9 @@
  *  - Types are enforced at the boundary.
  */
 
-const BASE = `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl`;
+// Removes trailing slash if it exists
+const cleanBackendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const BASE = `${cleanBackendUrl}/fl`;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
