@@ -51,7 +51,7 @@ export default function OverviewPage() {
             }
 
             // Poll Blockchain Economy
-            const bcRes = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/blockchain/status`);
+            const bcRes = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/fl/blockchain/status`);
             if (bcRes.ok) {
                 const bcJson = await bcRes.json();
                 setBlockchainData(bcJson);
@@ -129,7 +129,7 @@ export default function OverviewPage() {
         if (datasetUrl) formData.append("dataset_url", datasetUrl);
 
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/api/dataset/upload`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/fl/api/dataset/upload`, {
                 method: "POST",
                 body: formData,
             });
@@ -162,7 +162,7 @@ export default function OverviewPage() {
 
         try {
             setUploadStatus({ type: "info", msg: "Checking weights..." });
-            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/api/model/weights/${uploadClientId}`);
+            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/fl/api/model/weights/${uploadClientId}`);
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 setUploadStatus({

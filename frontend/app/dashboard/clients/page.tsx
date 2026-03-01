@@ -98,7 +98,7 @@ export default function ClientsPage() {
 
     const fetchClientUpdates = async () => {
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/clients`);
+            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/fl/clients`);
             if (res.ok) {
                 const json = await res.json();
                 setClientUpdates(json.data || []);
@@ -131,7 +131,7 @@ export default function ClientsPage() {
         setIsSimulating(true);
         setSimMessage({ type: "info", msg: "Firing simulation..." });
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/simulate`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/fl/simulate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ client_name: simName, is_malicious: isMalicious, malicious_multiplier: 50.0 }),

@@ -9,7 +9,7 @@
  */
 
 // Removes trailing slash if it exists
-const cleanBackendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const cleanBackendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
 const BASE = `${cleanBackendUrl}/fl`;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
