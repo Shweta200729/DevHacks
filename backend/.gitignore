@@ -7,8 +7,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# Environment variables
-# .env
+# Environment variables (keep secrets out of git!)
+.env
 
 # IDE
 .vscode/

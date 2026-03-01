@@ -140,7 +140,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[
+        os.environ.get("FRONTEND_URL", "http://localhost:3000"),
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1723,7 +1727,7 @@ def _train_client_background(
                     global global_model, val_loader
                     global_model = model_to_set
                     val_loader = loader_to_set
-            
+
             if main_event_loop and main_event_loop.is_running():
                 asyncio.run_coroutine_threadsafe(_inner(), main_event_loop).result()
             else:
@@ -1732,15 +1736,17 @@ def _train_client_background(
         if global_model is None:
             logger.info("[BG Train] Global model is None, setting to CSV target model.")
             _set_globals(new_model, new_val_loader)
-            
+
             if storage:
                 # Save initial version
                 def _save_init():
                     async def _inner():
                         await _init_fresh_model()
-                    
+
                     if main_event_loop and main_event_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(_inner(), main_event_loop).result()
+                        asyncio.run_coroutine_threadsafe(
+                            _inner(), main_event_loop
+                        ).result()
                     else:
                         asyncio.run(_inner())
 
@@ -1750,7 +1756,7 @@ def _train_client_background(
             current_keys = global_model.get_weights()
             new_keys = new_model.state_dict()
             mismatch = False
-            
+
             if current_keys.keys() != new_keys.keys():
                 mismatch = True
             else:
@@ -1758,12 +1764,16 @@ def _train_client_background(
                     if current_keys[k].shape != new_keys[k].shape:
                         mismatch = True
                         break
-            
+
             if mismatch:
-                logger.warning("[BG Train] Arch mismatch detected (e.g., CSV vs default MNIST). Overwriting global_model.")
+                logger.warning(
+                    "[BG Train] Arch mismatch detected (e.g., CSV vs default MNIST). Overwriting global_model."
+                )
                 _set_globals(new_model, new_val_loader)
             else:
-                logger.info("[BG Train] Arch matches. Updated global val_loader from CSV.")
+                logger.info(
+                    "[BG Train] Arch matches. Updated global val_loader from CSV."
+                )
                 _set_globals(global_model, new_val_loader)
 
         # ── Step 3: Get current or specific weights ───────────────
@@ -1896,42 +1906,50 @@ def _train_client_background(
                 f"[BG Train] ℹ️  Detection flagged weights ({reason}) — "
                 f"proceeding with aggregation anyway (server-side training is trusted)."
             )
-        # The previous background queue processing was deadlocking uvicorn 
+        # The previous background queue processing was deadlocking uvicorn
         # by missing the main loop's async context.
         # We need to dispatch the aggregation check back to the main event loop
         # using a simple non-blocking async function and create a task for it.
-        
+
         async def _check_and_aggregate():
             async with model_lock:
                 pending_updates.append((client_id, client_weights))
                 q = len(pending_updates)
                 logger.info(f"[BG Train] Queue: {q}/{runtime_cfg.MIN_AGGREGATE_SIZE}")
-                
+
                 if q >= runtime_cfg.MIN_AGGREGATE_SIZE:
                     batch = list(pending_updates)
                     pending_updates.clear()
                     # Await actual aggregation inside the lock
                     await _aggregate_and_update(batch)
-        
+
         # Fire and forget back onto the main event loop
         try:
             if main_event_loop is not None and main_event_loop.is_running():
                 # We do NOT await future.result() here because this runs in a Starlette AnyIO worker thread
                 # and blocking here while waiting for the main loop to process the lock will deadlock it.
-                future = asyncio.run_coroutine_threadsafe(_check_and_aggregate(), main_event_loop)
-                
+                future = asyncio.run_coroutine_threadsafe(
+                    _check_and_aggregate(), main_event_loop
+                )
+
                 def _on_done(f):
                     try:
                         f.result()
                     except Exception as e:
-                        logger.error(f"[BG Train] ❌ Aggregation trigger failed: {e}", exc_info=True)
-                
+                        logger.error(
+                            f"[BG Train] ❌ Aggregation trigger failed: {e}",
+                            exc_info=True,
+                        )
+
                 future.add_done_callback(_on_done)
             else:
                 # Fallback if no main loop exists (e.g. tests)
                 asyncio.run(_check_and_aggregate())
         except Exception as agg_err:
-            logger.error(f"[BG Train] ❌ Failed to schedule aggregation: {agg_err}", exc_info=True)
+            logger.error(
+                f"[BG Train] ❌ Failed to schedule aggregation: {agg_err}",
+                exc_info=True,
+            )
 
         logger.info(f"[BG Train] ✅ Complete for {client_id}")
 
@@ -1958,7 +1976,6 @@ async def get_training_status():
     }
 
 
-
 @app.post("/api/dataset/test")
 async def test_dataset(
     file: UploadFile = File(None),
@@ -1975,7 +1992,9 @@ async def test_dataset(
             content = first_chunk.decode("utf-8", errors="ignore")
             await file.seek(0)  # Reset pointer for the actual upload later
         elif dataset_url:
-            req = urllib.request.Request(dataset_url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(
+                dataset_url, headers={"User-Agent": "Mozilla/5.0"}
+            )
             with urllib.request.urlopen(req) as resp:
                 content = resp.read(1024 * 10).decode("utf-8", errors="ignore")
     except Exception as e:
@@ -2002,13 +2021,21 @@ async def test_dataset(
         }
 
     header_line = lines[0].strip()
-    
+
     # Heuristic detection logic
     # Topic 1: Numerical Feature Classification (Target)
-    is_numerical = "Feature_1" in header_line and "Feature_2" in header_line and "Label" in header_line
-    
+    is_numerical = (
+        "Feature_1" in header_line
+        and "Feature_2" in header_line
+        and "Label" in header_line
+    )
+
     # Topic 2: Car Sales (Incorrect domain)
-    is_car_sales = "Car Model" in header_line or "Mileage" in header_line or "Sell Price" in header_line
+    is_car_sales = (
+        "Car Model" in header_line
+        or "Mileage" in header_line
+        or "Sell Price" in header_line
+    )
 
     if is_numerical:
         return {
@@ -2016,7 +2043,7 @@ async def test_dataset(
             "detected_topic": "Numerical Feature Classification",
             "message": "Dataset structure verified: Standard high-dimensional features detected.",
         }
-    
+
     if is_car_sales:
         return {
             "valid": False,

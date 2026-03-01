@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: asyncfl-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE
+        sync: false          # Set manually in Render dashboard
+      - key: SUPABASE_ANON_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: SUPABASE_ROLE_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: FRONTEND_URL
+        sync: false          # Set to your Vercel URL, e.g. https://your-app.vercel.app
+      - key: DP_ENABLED
+        value: "false"
+      - key: DP_CLIP_NORM
+        value: "500.0"
+      - key: DP_NOISE_MULT
+        value: "0.01"
+      - key: DATASET_ROOT
+        value: "./data"
+      - key: NUM_CLIENTS
+        value: "5"
+      - key: LOCAL_EPOCHS
+        value: "1"
+      - key: BATCH_SIZE
+        value: "32"
+      - key: LEARNING_RATE
+        value: "0.01"
+      - key: OPTIMIZER
+        value: "sgd"
+      - key: MIN_AGGREGATE_SIZE
+        value: "1"
+      - key: MODEL_HIDDEN_DIMS
+        value: "256,128"
+      - key: DEVICE
+        value: "cpu"
+      - key: TEST_SPLIT_RATIO
+        value: "0.2"
+      - key: NORM_THRESHOLD
+        value: "1000.0"
+      - key: DISTANCE_THRESHOLD
+        value: "500.0"
+      - key: TRIM_RATIO
+        value: "0.1"
+      - key: BG_TRAIN_EPOCHS
+        value: "3"
+      - key: DATASET_NAME
+        value: ""
