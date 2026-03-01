@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { fetchMetrics, MetricsResponse, startPolling } from "@/lib/api";
 
-const BASE = "http://localhost:8000/fl";
+const BASE = `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl`;
 
 interface TrainPoint {
     label: string;

@@ -35,7 +35,7 @@ export function Sidebar() {
     useEffect(() => {
         const fetchTokens = async () => {
             try {
-                const res = await fetch("http://localhost:8000/fl/clients");
+                const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl/clients`);
                 if (res.ok) {
                     const json = await res.json();
                     let total = 0;

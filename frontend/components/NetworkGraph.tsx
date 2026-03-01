@@ -45,7 +45,7 @@ interface GraphLink {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const API_BASE = "http://localhost:8000/fl";
+const API_BASE = `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/fl`;
 const POLL_MS = 4000;
 
 const STATUS_COLORS: Record<string, string> = {
